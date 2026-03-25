@@ -1,0 +1,59 @@
+{
+  "experiment": {
+    "name": "phase1-exploration",
+    "benchmark": "tau2-bench",
+    "domain": "telecom",
+    "task_split": "base",
+    "task_subset": 10,
+    "trials": 1
+  },
+  "models": [
+    {
+      "id": "Qwen/Qwen3.5-0.8B",
+      "short_name": "qwen35-0.8b"
+    },
+    {
+      "id": "Qwen/Qwen3.5-4B",
+      "short_name": "qwen35-4b"
+    },
+    {
+      "id": "Qwen/Qwen3.5-9B",
+      "short_name": "qwen35-9b"
+    },
+    {
+      "id": "Qwen/Qwen3.5-35B-A3B",
+      "short_name": "qwen35-35b-a3b",
+      "extra_vllm_args": "--quantization fp8"
+    }
+  ],
+  "conditions": [
+    {
+      "name": "thinking_off",
+      "enable_thinking": false,
+      "retention_strategy": "strip_all"
+    },
+    {
+      "name": "strip_all",
+      "enable_thinking": true,
+      "retention_strategy": "strip_all"
+    },
+    {
+      "name": "window_3",
+      "enable_thinking": true,
+      "retention_strategy": "window_3"
+    },
+    {
+      "name": "retain_all",
+      "enable_thinking": true,
+      "retention_strategy": "retain_all"
+    }
+  ],
+  "user_sim": {
+    "model": "openai/gpt-oss-20b",
+    "provider": "groq"
+  },
+  "vllm": {
+    "base_args": "--enable-reasoning --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --language-model-only --max-model-len 32768",
+    "port": 8000
+  }
+}
