@@ -56,7 +56,7 @@
     "provider": "groq"
   },
   "llama": {
-    "base_args": "--jinja --flash-attn --n-gpu-layers 99 --ctx-size 32768 --reasoning-format none",
+    "base_args": "--jinja --flash-attn --n-gpu-layers 99 --ctx-size 32768 --reasoning-format none --chat-template-file configs/chat_template.jinja",
     "port": 8080
   }
 }
