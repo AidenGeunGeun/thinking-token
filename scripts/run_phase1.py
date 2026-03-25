@@ -387,6 +387,11 @@ def main() -> None:
             "No task selection found. Run `python scripts/select_tasks.py` first."
         )
 
+    # Ensure HF cache is on persistent volume (RunPod wipes /root/.cache on restart)
+    if "HF_HOME" not in os.environ and Path("/workspace").exists():
+        os.environ["HF_HOME"] = "/workspace/hf_cache"
+        os.environ["HUGGINGFACE_HUB_CACHE"] = "/workspace/hf_cache"
+
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     all_summaries: list[dict[str, Any]] = []
     port = int(config["vllm"]["port"])
