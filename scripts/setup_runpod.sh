@@ -5,9 +5,9 @@ set -euo pipefail
 # RunPod setup for thinking-tokens experiment
 #
 # Prerequisites:
-#   - RunPod GPU Pod (A100 80GB recommended)
-#   - Any PyTorch or CUDA template (Python version doesn't matter — we use uv)
-#   - Volume size ≥ 150GB (model weights are large)
+#   - RunPod GPU Pod (L40S 48GB recommended)
+#   - Any PyTorch or CUDA template
+#   - Volume size >= 100GB
 #   - Environment variables set in RunPod UI:
 #       GROQ_API_KEY=gsk_...
 #       HF_TOKEN=hf_...
@@ -18,25 +18,38 @@ echo "=== Setting up thinking-tokens experiment ==="
 REPO_DIR="/workspace/thinking-tokens"
 VENV_DIR="/workspace/venv"
 HF_CACHE="/workspace/hf_cache"
+LLAMA_DIR="/workspace/llama.cpp"
 
 # --- Persistent HuggingFace cache -------------------------------------------
-# Default /root/.cache gets wiped on pod restart. Redirect to /workspace.
 export HF_HOME="$HF_CACHE"
 export HUGGINGFACE_HUB_CACHE="$HF_CACHE"
 mkdir -p "$HF_CACHE"
 
-# Make it survive new SSH sessions
 grep -q 'HF_HOME=' /root/.bashrc 2>/dev/null || {
   echo "export HF_HOME=$HF_CACHE" >> /root/.bashrc
   echo "export HUGGINGFACE_HUB_CACHE=$HF_CACHE" >> /root/.bashrc
 }
 
 # --- System packages --------------------------------------------------------
-apt-get update && apt-get install -y git curl
+apt-get update && apt-get install -y git curl cmake build-essential
+
+# --- Build llama.cpp with CUDA ---------------------------------------------
+if [[ -f "$LLAMA_DIR/build/bin/llama-server" ]]; then
+  echo "llama.cpp already built at $LLAMA_DIR"
+else
+  echo "Building llama.cpp with CUDA support..."
+  git clone https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR" 2>/dev/null || {
+    echo "Repo exists, pulling latest..."
+    git -C "$LLAMA_DIR" pull --ff-only || true
+  }
+  cmake -B "$LLAMA_DIR/build" -S "$LLAMA_DIR" \
+    -DGGML_CUDA=ON \
+    -DCMAKE_BUILD_TYPE=Release
+  cmake --build "$LLAMA_DIR/build" --config Release -j"$(nproc)"
+  echo "llama.cpp built: $LLAMA_DIR/build/bin/llama-server"
+fi
 
 # --- Python 3.12 via uv ----------------------------------------------------
-# RunPod templates ship Python 3.10-3.11, but tau2-bench requires >=3.12.
-# uv handles Python version management cleanly.
 pip install uv 2>/dev/null || pip3 install uv
 
 if [[ -d "$VENV_DIR" ]]; then
@@ -51,12 +64,9 @@ fi
 
 echo "Python: $(python --version) at $(which python)"
 
-# --- Install dependencies ---------------------------------------------------
+# --- Install Python dependencies -------------------------------------------
 echo "Installing tau2-bench and litellm..."
-uv pip install tau2-bench litellm
-
-echo "Installing vLLM (nightly — required for Qwen3.5)..."
-uv pip install vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+uv pip install tau2-bench litellm huggingface-hub
 
 # --- Clone and install project ----------------------------------------------
 if [[ ! -d "$REPO_DIR" ]]; then
@@ -69,23 +79,27 @@ fi
 
 uv pip install -e "$REPO_DIR"
 
-# --- Add venv activation to bashrc ------------------------------------------
+# --- Shell setup ------------------------------------------------------------
 grep -q 'workspace/venv/bin/activate' /root/.bashrc 2>/dev/null || {
   echo "source /workspace/venv/bin/activate" >> /root/.bashrc
   echo "cd /workspace/thinking-tokens" >> /root/.bashrc
+  echo "export LLAMA_SERVER_BIN=/workspace/llama.cpp/build/bin/llama-server" >> /root/.bashrc
 }
+
+export LLAMA_SERVER_BIN="$LLAMA_DIR/build/bin/llama-server"
 
 # --- Verify installs --------------------------------------------------------
 echo ""
 echo "=== Verification ==="
 python -c "import src.register; print('  Agent registration: OK')"
-python -c "import vllm; print(f'  vLLM: {vllm.__version__}')"
 python -c "import tau2; print('  tau2-bench: OK')"
 python -c "import litellm; print(f'  litellm: {litellm.__version__}')"
+echo "  llama-server: $LLAMA_DIR/build/bin/llama-server"
+"$LLAMA_DIR/build/bin/llama-server" --version 2>&1 | head -1 || true
 
 # Check API keys
 python - <<'PY'
-import os, sys
+import os
 errors = []
 if not os.environ.get("GROQ_API_KEY"):
     errors.append("GROQ_API_KEY not set — needed for user simulator")
@@ -98,27 +112,31 @@ else:
     print("  API keys: OK")
 PY
 
-# --- Pre-download models ----------------------------------------------------
+# --- Pre-download GGUF models -----------------------------------------------
 echo ""
-echo "=== Downloading model weights (this takes a while) ==="
+echo "=== Downloading GGUF models (this takes a while) ==="
 python - <<'PY'
 import os
 os.environ.setdefault("HF_HOME", "/workspace/hf_cache")
 
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 
 models = [
-    "Qwen/Qwen3.5-0.8B",
-    "Qwen/Qwen3.5-4B",
-    "Qwen/Qwen3.5-9B",
-    "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4",
+    ("unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-Q4_K_M.gguf"),
+    ("unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-Q4_K_M.gguf"),
+    ("unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q4_K_M.gguf"),
+    ("unsloth/Qwen3.5-35B-A3B-GGUF", "Qwen3.5-35B-A3B-Q4_K_M.gguf"),
 ]
-for model_id in models:
+for repo, filename in models:
     try:
-        snapshot_download(model_id, token=os.environ.get("HF_TOKEN"))
-        print(f"  {model_id}: OK")
+        path = hf_hub_download(
+            repo_id=repo,
+            filename=filename,
+            token=os.environ.get("HF_TOKEN"),
+        )
+        print(f"  {repo}/{filename}: OK ({path})")
     except Exception as e:
-        print(f"  {model_id}: FAILED — {e}")
+        print(f"  {repo}/{filename}: FAILED — {e}")
 PY
 
 # --- Done -------------------------------------------------------------------

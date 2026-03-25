@@ -25,12 +25,16 @@ CONFIG_PATH = PROJECT_ROOT / "configs" / "phase1.yaml"
 TASKS_PATH = PROJECT_ROOT / "configs" / "phase1_tasks.json"
 RESULTS_ROOT = PROJECT_ROOT / "results" / "phase1"
 
+LLAMA_SERVER = os.environ.get(
+    "LLAMA_SERVER_BIN", "/workspace/llama.cpp/build/bin/llama-server"
+)
+
 
 @dataclass(frozen=True)
 class ModelConfig:
-    id: str
+    hf_repo: str
+    hf_file: str
     short_name: str
-    extra_vllm_args: str = ""
 
 
 @dataclass(frozen=True)
@@ -105,36 +109,35 @@ def load_task_ids(config: dict[str, Any]) -> list[str]:
     return [f"<select {subset} telecom tasks with scripts/select_tasks.py>"]
 
 
-def build_vllm_command(model: ModelConfig, vllm_config: dict[str, Any]) -> list[str]:
-    cmd = [
-        "vllm",
-        "serve",
-        model.id,
+def build_llama_command(model: ModelConfig, llama_config: dict[str, Any]) -> list[str]:
+    return [
+        LLAMA_SERVER,
+        "--hf-repo",
+        model.hf_repo,
+        "--hf-file",
+        model.hf_file,
         "--port",
-        str(vllm_config["port"]),
-        *shlex.split(vllm_config["base_args"]),
+        str(llama_config["port"]),
+        *shlex.split(llama_config["base_args"]),
     ]
-    if model.extra_vllm_args:
-        cmd.extend(shlex.split(model.extra_vllm_args))
-    return cmd
 
 
-def wait_for_vllm(
-    process: subprocess.Popen[Any], port: int, timeout_seconds: int = 900
+def wait_for_server(
+    process: subprocess.Popen[Any], port: int, timeout_seconds: int = 600
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     url = f"http://127.0.0.1:{port}/health"
     while time.monotonic() < deadline:
         exit_code = process.poll()
         if exit_code is not None:
-            raise RuntimeError(f"vLLM exited early with code {exit_code}")
+            raise RuntimeError(f"llama-server exited early with code {exit_code}")
         try:
             with urlopen(url, timeout=5) as response:
                 if response.status == 200:
                     return
         except (HTTPError, URLError, TimeoutError):
-            time.sleep(5)
-    raise TimeoutError(f"Timed out waiting for vLLM health endpoint at {url}")
+            time.sleep(3)
+    raise TimeoutError(f"Timed out waiting for llama-server health at {url}")
 
 
 def stop_process(process: subprocess.Popen[Any] | None) -> None:
@@ -153,18 +156,20 @@ def user_model_name(config: dict[str, Any]) -> str:
 
 
 def agent_llm_name(model: ModelConfig) -> str:
-    return f"hosted_vllm/{model.id}"
+    return f"openai/{model.short_name}"
 
 
 def agent_llm_args(condition: ConditionConfig, port: int) -> dict[str, Any]:
     return {
         "api_base": f"http://127.0.0.1:{port}/v1",
-        "api_key": os.environ.get("VLLM_API_KEY", ""),
-        "temperature": 0.0,
+        "api_key": "sk-no-key-required",
+        "temperature": 0.6,
+        "top_p": 0.95,
         "extra_body": {
+            "top_k": 20,
             "chat_template_kwargs": {
                 "enable_thinking": condition.enable_thinking,
-            }
+            },
         },
     }
 
@@ -185,8 +190,11 @@ def print_plan(
     )
     print("Phase 1 plan")
     print(
-        f"- benchmark: {config['experiment']['benchmark']} ({config['experiment']['domain']}/{config['experiment']['task_split']})"
+        f"- benchmark: {config['experiment']['benchmark']} "
+        f"({config['experiment']['domain']}/{config['experiment']['task_split']})"
     )
+    print(f"- server: llama.cpp ({LLAMA_SERVER})")
+    print(f"- quantization: Q4_K_M (uniform)")
     print(f"- models: {', '.join(model.short_name for model in models)}")
     print(f"- conditions: {', '.join(condition.name for condition in conditions)}")
     print(f"- task ids: {', '.join(task_ids)}")
@@ -359,7 +367,8 @@ def execute_condition_run(
     )
     summary = {
         "model": model.short_name,
-        "model_id": model.id,
+        "model_hf_repo": model.hf_repo,
+        "model_hf_file": model.hf_file,
         "condition": condition.name,
         "enable_thinking": condition.enable_thinking,
         "retention_strategy": condition.retention_strategy,
@@ -394,18 +403,21 @@ def main() -> None:
 
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     all_summaries: list[dict[str, Any]] = []
-    port = int(config["vllm"]["port"])
+    llama_config = config["llama"]
+    port = int(llama_config["port"])
     user_llm = user_model_name(config)
 
     for model in models:
         model_timestamp = utc_timestamp()
-        model_log_path = RESULTS_ROOT / f"{model.short_name}_{model_timestamp}_vllm.log"
-        model_log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path = RESULTS_ROOT / f"{model.short_name}_{model_timestamp}_llama.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         process = None
-        log_handle = model_log_path.open("w", encoding="utf-8")
+        log_handle = log_path.open("w", encoding="utf-8")
         try:
-            command = build_vllm_command(model, config["vllm"])
-            print(f"\nStarting vLLM for {model.short_name}: {' '.join(command)}")
+            command = build_llama_command(model, llama_config)
+            print(
+                f"\nStarting llama-server for {model.short_name}: {' '.join(command)}"
+            )
             process = subprocess.Popen(
                 command,
                 cwd=PROJECT_ROOT,
@@ -413,8 +425,8 @@ def main() -> None:
                 stderr=subprocess.STDOUT,
                 text=True,
             )
-            wait_for_vllm(process, port)
-            print(f"vLLM ready for {model.short_name}")
+            wait_for_server(process, port)
+            print(f"llama-server ready for {model.short_name}")
 
             for condition in conditions:
                 run_timestamp = utc_timestamp()

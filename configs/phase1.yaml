@@ -9,21 +9,24 @@
   },
   "models": [
     {
-      "id": "Qwen/Qwen3.5-0.8B",
+      "hf_repo": "unsloth/Qwen3.5-0.8B-GGUF",
+      "hf_file": "Qwen3.5-0.8B-Q4_K_M.gguf",
       "short_name": "qwen35-0.8b"
     },
     {
-      "id": "Qwen/Qwen3.5-4B",
+      "hf_repo": "unsloth/Qwen3.5-4B-GGUF",
+      "hf_file": "Qwen3.5-4B-Q4_K_M.gguf",
       "short_name": "qwen35-4b"
     },
     {
-      "id": "Qwen/Qwen3.5-9B",
+      "hf_repo": "unsloth/Qwen3.5-9B-GGUF",
+      "hf_file": "Qwen3.5-9B-Q4_K_M.gguf",
       "short_name": "qwen35-9b"
     },
     {
-      "id": "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4",
-      "short_name": "qwen35-35b-a3b",
-      "extra_vllm_args": "--quantization gptq"
+      "hf_repo": "unsloth/Qwen3.5-35B-A3B-GGUF",
+      "hf_file": "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+      "short_name": "qwen35-35b-a3b"
     }
   ],
   "conditions": [
@@ -52,8 +55,8 @@
     "model": "openai/gpt-oss-20b",
     "provider": "groq"
   },
-  "vllm": {
-    "base_args": "--enable-reasoning --reasoning-parser qwen3 --enable-auto-tool-choice --tool-call-parser qwen3_coder --language-model-only --max-model-len 32768",
-    "port": 8000
+  "llama": {
+    "base_args": "--jinja --flash-attn --n-gpu-layers 99 --ctx-size 32768 --reasoning-format none",
+    "port": 8080
   }
 }
