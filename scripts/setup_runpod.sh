@@ -111,7 +111,7 @@ models = [
     "Qwen/Qwen3.5-0.8B",
     "Qwen/Qwen3.5-4B",
     "Qwen/Qwen3.5-9B",
-    "Qwen/Qwen3.5-35B-A3B",
+    "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4",
 ]
 for model_id in models:
     try:

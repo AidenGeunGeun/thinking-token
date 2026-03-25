@@ -21,9 +21,9 @@
       "short_name": "qwen35-9b"
     },
     {
-      "id": "Qwen/Qwen3.5-35B-A3B",
+      "id": "Qwen/Qwen3.5-35B-A3B-GPTQ-Int4",
       "short_name": "qwen35-35b-a3b",
-      "extra_vllm_args": "--quantization fp8"
+      "extra_vllm_args": "--quantization gptq"
     }
   ],
   "conditions": [
