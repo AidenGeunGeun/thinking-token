@@ -10,15 +10,15 @@ Phase 1: building the tau2-bench integration and RunPod workflow for the first 1
 
 ## Environment
 
-- Hardware target: RunPod A100 80GB
-- Inference: vLLM
-- Python: 3.12 or 3.13
+- Hardware target: RunPod L40S 48GB
+- Inference: llama.cpp (llama-server) with GGUF Q4_K_M
+- Python: 3.12+
 
 ## Dependencies
 
 - `tau2-bench`
-- `vllm`
 - `litellm`
+- `llama.cpp` (built from source with CUDA)
 
 ## Architecture
 
@@ -27,7 +27,8 @@ thinking-tokens/
 ├── EXPERIMENT.md         # Experimental design
 ├── AGENTS.md             # This file
 ├── configs/
-│   └── phase1.yaml       # Phase 1 experiment config
+│   ├── phase1.yaml       # Phase 1 experiment config
+│   └── chat_template.jinja  # Modified Qwen3.5 template (preserves thinking in history)
 ├── src/
 │   ├── __init__.py
 │   ├── agent.py          # ThinkingRetentionAgent (subclasses tau2-bench LLMAgent)
