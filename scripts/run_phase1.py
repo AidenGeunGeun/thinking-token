@@ -109,13 +109,26 @@ def load_task_ids(config: dict[str, Any]) -> list[str]:
     return [f"<select {subset} telecom tasks with scripts/select_tasks.py>"]
 
 
-def build_llama_command(model: ModelConfig, llama_config: dict[str, Any]) -> list[str]:
+def resolve_model_path(model: ModelConfig) -> str:
+    """Resolve the local path for a GGUF model, downloading if needed.
+
+    Uses huggingface_hub so the file lives in HF_HOME (persistent on RunPod).
+    Returns the absolute path to the .gguf file.
+    """
+    from huggingface_hub import hf_hub_download  # type: ignore[import-untyped]
+
+    return hf_hub_download(
+        repo_id=model.hf_repo,
+        filename=model.hf_file,
+        token=os.environ.get("HF_TOKEN"),
+    )
+
+
+def build_llama_command(model_path: str, llama_config: dict[str, Any]) -> list[str]:
     return [
         LLAMA_SERVER,
-        "--hf-repo",
-        model.hf_repo,
-        "--hf-file",
-        model.hf_file,
+        "-m",
+        model_path,
         "--port",
         str(llama_config["port"]),
         *shlex.split(llama_config["base_args"]),
@@ -414,10 +427,11 @@ def main() -> None:
         process = None
         log_handle = log_path.open("w", encoding="utf-8")
         try:
-            command = build_llama_command(model, llama_config)
-            print(
-                f"\nStarting llama-server for {model.short_name}: {' '.join(command)}"
-            )
+            print(f"\nResolving GGUF path for {model.short_name}...")
+            model_path = resolve_model_path(model)
+            print(f"  -> {model_path}")
+            command = build_llama_command(model_path, llama_config)
+            print(f"Starting llama-server for {model.short_name}: {' '.join(command)}")
             process = subprocess.Popen(
                 command,
                 cwd=PROJECT_ROOT,
@@ -446,6 +460,21 @@ def main() -> None:
                     port=port,
                 )
                 all_summaries.append(summary)
+
+                # Validate: thinking_off should produce no thinking content
+                if not condition.enable_thinking:
+                    analysis_path = run_dir / "thinking_analysis.jsonl"
+                    if analysis_path.exists():
+                        leaked = 0
+                        for line in analysis_path.read_text().splitlines():
+                            rec = json.loads(line)
+                            if rec.get("thinking_tokens_approx", 0) > 0:
+                                leaked += 1
+                        if leaked:
+                            print(
+                                f"  WARNING: thinking_off leaked thinking in "
+                                f"{leaked} turns — baseline may be contaminated"
+                            )
         finally:
             stop_process(process)
             log_handle.close()

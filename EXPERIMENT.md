@@ -23,7 +23,7 @@ A turn is everything between consecutive user messages. Within a single turn, th
 
 ## Models
 
-All Phase 1 runs use the Qwen3.5 family on vLLM on a RunPod A100 80GB.
+All Phase 1 runs use the Qwen3.5 family (GGUF Q4_K_M) on llama.cpp on a RunPod H100 SXM 80GB.
 
 | Model | Notes |
 | --- | --- |
@@ -64,7 +64,7 @@ Total: 16 configurations.
 - Total: 160 task runs
 - Goal: qualitative exploration
 - Analysis mode: read trajectories, compare behavior, spot failure-mode differences
-- Budget target: about $5 on a single RunPod A100 80GB
+- Budget target: about $5-7 on a single RunPod H100 SXM
 
 ## Phase 2
 
@@ -72,9 +72,10 @@ Future work only. If Phase 1 shows promising differences, expand to a larger tas
 
 ## Infrastructure
 
-- GPU: RunPod A100 80GB
-- Inference engine: vLLM
-- Reasoning flags: `--enable-reasoning --reasoning-parser qwen3`
+- GPU: RunPod H100 SXM 80GB
+- Inference engine: llama.cpp (llama-server) with GGUF Q4_K_M
+- Server flags: `--jinja --flash-attn --n-gpu-layers 99 --reasoning-format none`
+- Custom chat template: preserves thinking in history (overrides Qwen3.5 default stripping)
 - User simulator: GPT-OSS-20B on Groq
 - Groq pricing reference: $0.075 / M input tokens, $0.30 / M output tokens
 
