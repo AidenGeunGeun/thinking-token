@@ -6,6 +6,7 @@ import importlib
 import os
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -42,7 +43,21 @@ class AgentSummarizationTest(unittest.TestCase):
                     llm="openai/test-model",
                     llm_args={},
                 )
+        agent.tools = []
+        agent.llm = "openai/test-model"
+        agent.llm_args = {}
         return agent
+
+    def _make_state(
+        self,
+        messages: list[Any] | None = None,
+        system_messages: list[Any] | None = None,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            messages=list(messages or []),
+            system_messages=list(system_messages or []),
+            tools=[],
+        )
 
     def test_summarize_replaces_thinking(self):
         agent = self._make_agent()
@@ -131,6 +146,210 @@ class AgentSummarizationTest(unittest.TestCase):
         result = agent_module._restore_thinking_blocks(msg)
         # Content should remain None — don't inject thinking into tool-call messages
         self.assertIsNone(result.content)
+
+    def test_generate_next_message_internal_history_keeps_summary(self):
+        agent = self._make_agent()
+        state = self._make_state(
+            system_messages=[MockMessage(role="system", content="policy")]
+        )
+        incoming = MockMessage(role="user", content="What is 6 * 7?")
+        generated = MockMessage(
+            role="assistant",
+            content="<think>long reasoning</think>The answer is 42",
+        )
+
+        with (
+            patch("src.agent.generate", return_value=generated),
+            patch("src.agent.summarize_thinking", return_value="Short summary"),
+        ):
+            returned = agent._generate_next_message(incoming, state)
+
+        self.assertEqual(len(agent._internal_messages), 2)
+        self.assertIs(agent._internal_messages[0], incoming)
+        self.assertEqual(
+            agent._internal_messages[1].content,
+            "<think_summary>Short summary</think_summary>\nThe answer is 42",
+        )
+        self.assertIsNot(agent._internal_messages[1], returned)
+
+    def test_generate_next_message_seeds_internal_history_from_existing_state(self):
+        agent = self._make_agent({"SUMMARIZE_THINKING": "false"})
+        prior_assistant = MockMessage(role="assistant", content="Hi! How can I help?")
+        state = self._make_state(
+            messages=[prior_assistant],
+            system_messages=[MockMessage(role="system", content="policy")],
+        )
+        incoming = MockMessage(role="user", content="I need help")
+        generated = MockMessage(role="assistant", content="Sure")
+
+        with patch("src.agent.generate", return_value=generated) as mock_generate:
+            returned = agent._generate_next_message(incoming, state)
+
+        prompt_messages = mock_generate.call_args.kwargs["messages"]
+
+        self.assertEqual(
+            [msg.content for msg in prompt_messages],
+            ["policy", "Hi! How can I help?", "I need help"],
+        )
+        self.assertIs(agent._internal_messages[0], prior_assistant)
+        self.assertIs(agent._internal_messages[1], incoming)
+        self.assertEqual(returned.content, "Sure")
+
+    def test_generate_next_message_returns_message_without_any_thinking_tags(self):
+        agent = self._make_agent({"SUMMARIZE_THINKING": "false"})
+        state = self._make_state()
+        incoming = MockMessage(role="user", content="Hello")
+        generated = MockMessage(
+            role="assistant",
+            content="<think>reasoning</think>Visible<think_summary>note</think_summary>",
+        )
+
+        with patch("src.agent.generate", return_value=generated):
+            returned = agent._generate_next_message(incoming, state)
+
+        self.assertEqual(returned.content, "Visible")
+        self.assertNotIn("<think>", returned.content)
+        self.assertNotIn("<think_summary>", returned.content)
+
+    def test_generate_next_message_strips_thinking_from_tool_call_content(self):
+        agent = self._make_agent({"SUMMARIZE_THINKING": "false"})
+        state = self._make_state()
+        incoming = MockMessage(role="user", content="Find the account")
+        generated = MockMessage(
+            role="assistant",
+            content="<think>lookup plan</think>Calling tool",
+            tool_calls=[{"name": "get_customer", "arguments": "{}"}],
+        )
+
+        with patch("src.agent.generate", return_value=generated):
+            returned = agent._generate_next_message(incoming, state)
+
+        self.assertEqual(
+            agent._internal_messages[1].content,
+            "<think>lookup plan</think>Calling tool",
+        )
+        self.assertEqual(returned.content, "Calling tool")
+        self.assertEqual(returned.tool_calls, generated.tool_calls)
+
+    def test_generate_next_message_strip_all_keeps_prompt_and_returned_views_clean(
+        self,
+    ):
+        agent = self._make_agent(
+            {"RETENTION_STRATEGY": "strip_all", "SUMMARIZE_THINKING": "false"}
+        )
+        state = self._make_state(
+            system_messages=[MockMessage(role="system", content="policy")]
+        )
+        first_user = MockMessage(role="user", content="First question")
+        second_user = MockMessage(role="user", content="Second question")
+        first_generated = MockMessage(
+            role="assistant",
+            content="<think>private reasoning</think>First answer",
+        )
+        second_generated = MockMessage(role="assistant", content="Second answer")
+
+        with patch(
+            "src.agent.generate", side_effect=[first_generated, second_generated]
+        ) as mock_generate:
+            first_returned = agent._generate_next_message(first_user, state)
+            state.messages.append(first_returned)
+            second_returned = agent._generate_next_message(second_user, state)
+
+        second_prompt_messages = mock_generate.call_args_list[1].kwargs["messages"]
+        assistant_messages = [
+            msg
+            for msg in second_prompt_messages
+            if getattr(msg, "role", None) == "assistant"
+        ]
+
+        self.assertEqual(first_returned.content, "First answer")
+        self.assertEqual(
+            agent._internal_messages[1].content,
+            "<think>private reasoning</think>First answer",
+        )
+        self.assertEqual(len(assistant_messages), 1)
+        self.assertEqual(assistant_messages[0].content, "First answer")
+        self.assertEqual(second_returned.content, "Second answer")
+
+    def test_generate_next_message_retain_all_keeps_raw_thinking_in_internal_prompt_view(
+        self,
+    ):
+        agent = self._make_agent(
+            {"RETENTION_STRATEGY": "retain_all", "SUMMARIZE_THINKING": "false"}
+        )
+        state = self._make_state(
+            system_messages=[MockMessage(role="system", content="policy")]
+        )
+        first_user = MockMessage(role="user", content="First question")
+        second_user = MockMessage(role="user", content="Second question")
+        first_generated = MockMessage(
+            role="assistant",
+            content="<think>private reasoning</think>First answer",
+        )
+        second_generated = MockMessage(role="assistant", content="Second answer")
+
+        with patch(
+            "src.agent.generate", side_effect=[first_generated, second_generated]
+        ) as mock_generate:
+            first_returned = agent._generate_next_message(first_user, state)
+            state.messages.append(first_returned)
+            agent._generate_next_message(second_user, state)
+
+        second_prompt_messages = mock_generate.call_args_list[1].kwargs["messages"]
+        assistant_messages = [
+            msg
+            for msg in second_prompt_messages
+            if getattr(msg, "role", None) == "assistant"
+        ]
+
+        self.assertEqual(
+            agent._internal_messages[1].content,
+            "<think>private reasoning</think>First answer",
+        )
+        self.assertEqual(first_returned.content, "First answer")
+        self.assertEqual(len(assistant_messages), 1)
+        self.assertEqual(
+            assistant_messages[0].content,
+            "<think>private reasoning</think>First answer",
+        )
+
+    def test_generate_next_message_preserves_internal_history_across_state_swap(self):
+        agent = self._make_agent(
+            {"RETENTION_STRATEGY": "retain_all", "SUMMARIZE_THINKING": "false"}
+        )
+        system_messages = [MockMessage(role="system", content="policy")]
+        first_state = self._make_state(system_messages=system_messages)
+        first_user = MockMessage(role="user", content="First question")
+        second_user = MockMessage(role="user", content="Second question")
+        first_generated = MockMessage(
+            role="assistant",
+            content="<think>private reasoning</think>First answer",
+        )
+        second_generated = MockMessage(role="assistant", content="Second answer")
+
+        with patch(
+            "src.agent.generate", side_effect=[first_generated, second_generated]
+        ) as mock_generate:
+            first_returned = agent._generate_next_message(first_user, first_state)
+            first_state.messages.append(first_returned)
+            second_state = self._make_state(
+                messages=list(first_state.messages),
+                system_messages=system_messages,
+            )
+            agent._generate_next_message(second_user, second_state)
+
+        second_prompt_messages = mock_generate.call_args_list[1].kwargs["messages"]
+        assistant_messages = [
+            msg
+            for msg in second_prompt_messages
+            if getattr(msg, "role", None) == "assistant"
+        ]
+
+        self.assertEqual(len(assistant_messages), 1)
+        self.assertEqual(
+            assistant_messages[0].content,
+            "<think>private reasoning</think>First answer",
+        )
 
 
 if __name__ == "__main__":
