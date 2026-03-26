@@ -53,6 +53,7 @@ from .thinking import (
     apply_retention_strategy,
     extract_thinking,
     replace_thinking_with_summary,
+    strip_think_summary,
     strip_all_thinking_tags,
     summarize_thinking,
 )
@@ -247,6 +248,10 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
         self.summarizer_model = os.environ.get("SUMMARIZER_MODEL", "")
         self.summarizer_prompt = os.environ.get("SUMMARIZER_PROMPT", "")
         self.turn_delay = float(os.environ.get("TURN_DELAY_SECONDS", "0"))
+        self._debug_snapshot_path: str = os.environ.get(
+            "THINKING_DEBUG_SNAPSHOT_PATH", ""
+        )
+        self._debug_assistant_turns: list[dict[str, Any]] = []
         self._internal_state: Any | None = None
         self._internal_messages: list[Any] = []
 
@@ -332,8 +337,35 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
             "<think>" not in content and "<think_summary>" not in content
         ):
             return assistant_message
-        assistant_message.content = strip_all_thinking_tags(content).strip()
+        assistant_message.content = strip_think_summary(
+            strip_all_thinking_tags(content)
+        ).strip()
         return assistant_message
+
+    def _write_debug_snapshot(self) -> None:
+        if not self._debug_snapshot_path:
+            return
+
+        snapshot = [
+            {
+                "role": getattr(message, "role", "unknown"),
+                "content": getattr(message, "content", "") or "",
+            }
+            for message in self._internal_messages
+        ]
+        try:
+            with open(self._debug_snapshot_path, "w", encoding="utf-8") as handle:
+                json.dump(snapshot, handle, indent=2)
+            with open(
+                f"{self._debug_snapshot_path}.meta", "w", encoding="utf-8"
+            ) as handle:
+                json.dump(
+                    {"assistant_turns": self._debug_assistant_turns},
+                    handle,
+                    indent=2,
+                )
+        except Exception:
+            logger.warning("Failed to write thinking debug snapshot", exc_info=True)
 
     def _generate_next_message(self, message: Any, state: Any) -> Any:
         if isinstance(message, UserMessage) and message.is_audio:
@@ -361,8 +393,25 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
         )
         assistant_message = _restore_thinking_blocks(assistant_message)
         assistant_message = self._maybe_summarize_thinking(assistant_message)
+        if self._debug_snapshot_path:
+            content = getattr(assistant_message, "content", "") or ""
+            reasoning = _extract_reasoning(getattr(assistant_message, "raw_data", None))
+            extracted_thinking, _ = extract_thinking(content)
+            self._debug_assistant_turns.append(
+                {
+                    "content": content,
+                    "has_think": "<think>" in content,
+                    "has_think_summary": "<think_summary>" in content,
+                    "raw_thinking_chars": len(extracted_thinking or reasoning or ""),
+                }
+            )
         self._internal_messages.append(copy.deepcopy(assistant_message))
+        self._internal_messages = apply_retention_strategy(
+            self._internal_messages,
+            self.retention_strategy,
+        )
         assistant_message = self._strip_thinking_for_history(assistant_message)
+        self._write_debug_snapshot()
         if self.turn_delay > 0:
             time.sleep(self.turn_delay)
         return assistant_message

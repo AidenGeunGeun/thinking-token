@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import importlib
 import os
+import tempfile
 import unittest
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -244,7 +246,7 @@ class AgentSummarizationTest(unittest.TestCase):
             returned = agent._generate_next_message(incoming, state)
 
         self.assertEqual(len(agent._internal_messages), 2)
-        self.assertIs(agent._internal_messages[0], incoming)
+        self.assertEqual(agent._internal_messages[0].content, incoming.content)
         self.assertEqual(
             agent._internal_messages[1].content,
             "<think_summary>Short summary</think_summary>\nThe answer is 42",
@@ -270,8 +272,8 @@ class AgentSummarizationTest(unittest.TestCase):
             [msg.content for msg in prompt_messages],
             ["policy", "Hi! How can I help?", "I need help"],
         )
-        self.assertIs(agent._internal_messages[0], prior_assistant)
-        self.assertIs(agent._internal_messages[1], incoming)
+        self.assertEqual(agent._internal_messages[0].content, prior_assistant.content)
+        self.assertEqual(agent._internal_messages[1].content, incoming.content)
         self.assertEqual(returned.content, "Sure")
 
     def test_generate_next_message_returns_message_without_any_thinking_tags(self):
@@ -344,11 +346,51 @@ class AgentSummarizationTest(unittest.TestCase):
         self.assertEqual(first_returned.content, "First answer")
         self.assertEqual(
             agent._internal_messages[1].content,
-            "<think>private reasoning</think>First answer",
+            "First answer",
         )
         self.assertEqual(len(assistant_messages), 1)
         self.assertEqual(assistant_messages[0].content, "First answer")
         self.assertEqual(second_returned.content, "Second answer")
+
+    def test_generate_next_message_window3_strips_older_internal_turns(self):
+        agent = self._make_agent(
+            {"RETENTION_STRATEGY": "window_3", "SUMMARIZE_THINKING": "false"}
+        )
+        state = self._make_state(
+            system_messages=[MockMessage(role="system", content="policy")]
+        )
+        users = [
+            MockMessage(role="user", content="First question"),
+            MockMessage(role="user", content="Second question"),
+            MockMessage(role="user", content="Third question"),
+            MockMessage(role="user", content="Fourth question"),
+        ]
+        generated = [
+            MockMessage(role="assistant", content="<think>t1</think>First answer"),
+            MockMessage(role="assistant", content="<think>t2</think>Second answer"),
+            MockMessage(role="assistant", content="<think>t3</think>Third answer"),
+            MockMessage(role="assistant", content="<think>t4</think>Fourth answer"),
+        ]
+
+        with patch("src.agent.generate", side_effect=generated):
+            for user in users:
+                returned = agent._generate_next_message(user, state)
+                state.messages.append(returned)
+
+        assistant_messages = [
+            message
+            for message in agent._internal_messages
+            if getattr(message, "role", None) == "assistant"
+        ]
+        self.assertEqual(
+            [message.content for message in assistant_messages],
+            [
+                "First answer",
+                "<think>t2</think>Second answer",
+                "<think>t3</think>Third answer",
+                "<think>t4</think>Fourth answer",
+            ],
+        )
 
     def test_generate_next_message_retain_all_keeps_raw_thinking_in_internal_prompt_view(
         self,
@@ -391,6 +433,55 @@ class AgentSummarizationTest(unittest.TestCase):
             assistant_messages[0].content,
             "<think>private reasoning</think>First answer",
         )
+
+    def test_generate_next_message_writes_debug_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = os.path.join(tmpdir, "snapshot.json")
+            agent = self._make_agent(
+                {
+                    "RETENTION_STRATEGY": "retain_all",
+                    "SUMMARIZE_THINKING": "false",
+                    "THINKING_DEBUG_SNAPSHOT_PATH": snapshot_path,
+                }
+            )
+            state = self._make_state()
+            incoming = MockMessage(role="user", content="Hello")
+            generated = MockMessage(
+                role="assistant",
+                content="<think>private reasoning</think>Visible answer",
+            )
+
+            with patch("src.agent.generate", return_value=generated):
+                agent._generate_next_message(incoming, state)
+
+            with open(snapshot_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            with open(f"{snapshot_path}.meta", encoding="utf-8") as handle:
+                meta_payload = json.load(handle)
+
+            self.assertEqual(
+                payload,
+                [
+                    {"role": "user", "content": "Hello"},
+                    {
+                        "role": "assistant",
+                        "content": "<think>private reasoning</think>Visible answer",
+                    },
+                ],
+            )
+            self.assertEqual(
+                meta_payload,
+                {
+                    "assistant_turns": [
+                        {
+                            "content": "<think>private reasoning</think>Visible answer",
+                            "has_think": True,
+                            "has_think_summary": False,
+                            "raw_thinking_chars": len("private reasoning"),
+                        }
+                    ]
+                },
+            )
 
     def test_generate_next_message_preserves_internal_history_across_state_swap(self):
         agent = self._make_agent(
