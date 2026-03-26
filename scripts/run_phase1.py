@@ -45,11 +45,15 @@ def _register_model_costs() -> None:
             litellm.model_cost[f"openai/{name}"] = litellm.model_cost[name]
 
         # OpenRouter MiMo V2 Flash — user simulator and summarizer
-        litellm.model_cost["openrouter/xiaomi/mimo-v2-flash"] = {
+        # Register both the alias and the versioned name OpenRouter resolves to
+        _mimo_cost = {
             "input_cost_per_token": 0.0000001,
             "output_cost_per_token": 0.0000003,
             "max_tokens": 131072,
         }
+        litellm.model_cost["openrouter/xiaomi/mimo-v2-flash"] = _mimo_cost
+        litellm.model_cost["openrouter/xiaomi/mimo-v2-flash-20251210"] = _mimo_cost
+        litellm.model_cost["xiaomi/mimo-v2-flash-20251210"] = _mimo_cost
     except ImportError:
         pass
 
