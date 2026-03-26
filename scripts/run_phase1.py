@@ -24,6 +24,41 @@ import logging
 
 logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
 logging.getLogger("tau2.utils.llm_utils").setLevel(logging.WARNING)
+
+
+def _register_model_costs() -> None:
+    """Register custom model pricing so litellm stops complaining."""
+    try:
+        import litellm  # type: ignore[import-untyped]
+
+        # Local models — free (GPU cost is tracked separately)
+        for name in [
+            "Qwen3.5-0.8B-Q4_K_M.gguf",
+            "Qwen3.5-4B-Q4_K_M.gguf",
+            "Qwen3.5-9B-Q4_K_M.gguf",
+            "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+        ]:
+            litellm.model_cost[name] = {
+                "input_cost_per_token": 0.0,
+                "output_cost_per_token": 0.0,
+                "max_tokens": 131072,
+            }
+            litellm.model_cost[f"openai/{name}"] = litellm.model_cost[name]
+
+        # Groq GPT-OSS-20B — user simulator
+        litellm.model_cost["groq/openai/gpt-oss-20b"] = {
+            "input_cost_per_token": 0.000000075,
+            "output_cost_per_token": 0.0000003,
+            "max_tokens": 131072,
+        }
+        litellm.model_cost["openai/gpt-oss-20b"] = litellm.model_cost[
+            "groq/openai/gpt-oss-20b"
+        ]
+    except ImportError:
+        pass
+
+
+_register_model_costs()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
