@@ -365,9 +365,13 @@ def verify_condition(
     llama_config = config["llama"]
     port = int(llama_config["port"])
 
-    with tempfile.TemporaryDirectory(prefix=f"verify_{condition.name}_") as tmpdir:
+    verify_dir = PROJECT_ROOT / "results" / "verify"
+    verify_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f"verify_{condition.name}_", dir=verify_dir
+    ) as tmpdir:
         run_dir = Path(tmpdir)
-        log_path = run_dir / "llama.log"
+        log_path = verify_dir / f"llama_{condition.name}.log"
         snapshot_path = run_dir / "internal_snapshot.json"
         process = None
 
