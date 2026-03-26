@@ -18,6 +18,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+# Suppress noisy litellm cost-tracking errors for local models
+import logging
+
+logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
+logging.getLogger("tau2.utils.llm_utils").setLevel(logging.WARNING)
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -213,12 +219,18 @@ def agent_llm_name(model: ModelConfig) -> str:
     return f"openai/{model.short_name}"
 
 
-def agent_llm_args(condition: ConditionConfig, port: int) -> dict[str, Any]:
+def agent_llm_args(
+    condition: ConditionConfig, port: int, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    max_tokens = 8192
+    if config and "generation" in config:
+        max_tokens = config["generation"].get("max_tokens", 8192)
     return {
         "api_base": f"http://127.0.0.1:{port}/v1",
         "api_key": "sk-no-key-required",
         "temperature": 0.6,
         "top_p": 0.95,
+        "max_tokens": max_tokens,
         "extra_body": {
             "top_k": 20,
             "chat_template_kwargs": {

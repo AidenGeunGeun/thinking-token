@@ -55,6 +55,9 @@
     "model": "openai/gpt-oss-20b",
     "provider": "groq"
   },
+  "generation": {
+    "max_tokens": 8192
+  },
   "llama": {
     "base_args": "--jinja --flash-attn on --n-gpu-layers 99 --ctx-size 131072 --reasoning-format none --chat-template-file configs/chat_template.jinja",
     "port": 8080
