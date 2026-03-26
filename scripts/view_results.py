@@ -9,7 +9,7 @@ from pathlib import Path
 
 RESULTS_ROOT = Path(__file__).resolve().parents[1] / "results" / "phase1"
 
-MODEL_ORDER = ["qwen35-0.8b", "qwen35-4b", "qwen35-9b", "qwen35-35b-a3b"]
+MODEL_ORDER = ["qwen35-0.8b", "qwen35-4b", "qwen35-9b"]
 CONDITION_ORDER = ["thinking_off", "strip_all", "window_3", "retain_all"]
 
 

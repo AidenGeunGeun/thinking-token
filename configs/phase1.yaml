@@ -22,11 +22,6 @@
       "hf_repo": "unsloth/Qwen3.5-9B-GGUF",
       "hf_file": "Qwen3.5-9B-Q4_K_M.gguf",
       "short_name": "qwen35-9b"
-    },
-    {
-      "hf_repo": "unsloth/Qwen3.5-35B-A3B-GGUF",
-      "hf_file": "Qwen3.5-35B-A3B-Q4_K_M.gguf",
-      "short_name": "qwen35-35b-a3b"
     }
   ],
   "conditions": [
