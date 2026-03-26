@@ -33,7 +33,7 @@ def _register_model_costs() -> None:
 
         # Local models — free (GPU cost is tracked separately)
         for name in [
-            "Qwen3.5-0.8B-Q8_0.gguf",
+            "Qwen3.5-2B-Q8_0.gguf",
             "Qwen3.5-4B-Q8_0.gguf",
             "Qwen3.5-9B-Q8_0.gguf",
         ]:
