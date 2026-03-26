@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Phase 1: 10 telecom tasks x 4 models x 4 conditions = 160 runs."""
+"""Run Phase 1: 10 telecom tasks x 3 models x 4 conditions = 120 runs."""
 
 from __future__ import annotations
 
@@ -80,6 +80,7 @@ class ConditionConfig:
     name: str
     enable_thinking: bool
     retention_strategy: str
+    summarize_thinking: bool = False
 
 
 def utc_timestamp() -> str:

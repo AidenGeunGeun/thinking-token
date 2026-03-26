@@ -1,0 +1,13 @@
+{
+  "workspaceRoot": "/Users/aidenkim/projects/local-llm/thinking-tokens",
+  "projects": [
+    {
+      "name": "thinking-tokens",
+      "path": ".",
+      "root": "/Users/aidenkim/projects/local-llm/thinking-tokens",
+      "gitRoot": "/Users/aidenkim/projects/local-llm/thinking-tokens",
+      "lastIndexed": "2026-03-26T03:33:17.112Z",
+      "entityCount": 75
+    }
+  ]
+}
