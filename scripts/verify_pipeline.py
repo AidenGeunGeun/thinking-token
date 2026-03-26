@@ -58,6 +58,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="single condition name to verify",
     )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=15,
+        help="max steps per task (default 15; 0 = let tau2 decide naturally)",
+    )
     return parser.parse_args(argv)
 
 
@@ -312,6 +318,7 @@ def _run_single_task(
     condition: run_phase1.ConditionConfig,
     task_ids: list[str],
     run_dir: Path,
+    max_steps: int = 15,
 ):
     import src.register  # noqa: F401
     from tau2.data_model.simulation import TextRunConfig  # type: ignore[import-not-found]
@@ -343,7 +350,7 @@ def _run_single_task(
         llm_user=run_phase1.user_model_name(config),
         llm_args_user={},
         max_concurrency=1,
-        max_steps=15,
+        **({"max_steps": max_steps} if max_steps > 0 else {}),
         verbose_logs=False,
     )
     results = run_tasks(
@@ -362,6 +369,7 @@ def verify_condition(
     condition: run_phase1.ConditionConfig,
     task_ids: list[str],
     llama_server: str,
+    max_steps: int = 15,
 ) -> ConditionReport:
     llama_config = config["llama"]
     port = int(llama_config["port"])
@@ -393,7 +401,14 @@ def verify_condition(
                     text=True,
                 )
                 run_phase1.wait_for_server(process, port)
-                results = _run_single_task(config, model, condition, task_ids, run_dir)
+                results = _run_single_task(
+                    config,
+                    model,
+                    condition,
+                    task_ids,
+                    run_dir,
+                    max_steps=max_steps,
+                )
         finally:
             run_phase1.stop_process(process)
             os.environ.pop("THINKING_DEBUG_SNAPSHOT_PATH", None)
@@ -488,7 +503,9 @@ def main(args: argparse.Namespace) -> int:
     print(f"Verifying model: {model.short_name}")
     print(f"Task id: {task_ids[0]}")
     for condition in conditions:
-        report = verify_condition(config, model, condition, task_ids, llama_server)
+        report = verify_condition(
+            config, model, condition, task_ids, llama_server, max_steps=args.max_steps
+        )
         reports.append(report)
         print_condition_report(report)
 
