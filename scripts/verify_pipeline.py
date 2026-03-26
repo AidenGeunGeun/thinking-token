@@ -343,6 +343,7 @@ def _run_single_task(
         llm_user=run_phase1.user_model_name(config),
         llm_args_user={},
         max_concurrency=1,
+        max_steps=15,
         verbose_logs=False,
     )
     results = run_tasks(
