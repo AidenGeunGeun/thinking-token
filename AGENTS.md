@@ -10,7 +10,7 @@ Phase 1: building the tau2-bench integration and RunPod workflow for the first 1
 
 ## Environment
 
-- Hardware target: RunPod L40S 48GB
+- Hardware target: RunPod, >=48GB VRAM (H200 SXM, H100 SXM, or RTX PRO 6000)
 - Inference: llama.cpp (llama-server) with GGUF Q4_K_M
 - Python: 3.12+
 
@@ -65,6 +65,9 @@ python scripts/select_tasks.py
 
 # Print the full Phase 1 plan without executing
 python scripts/run_phase1.py --dry-run
+
+# Run the preflight smoke test
+python scripts/run_phase1.py --smoke
 
 # Run one model / one condition slice
 python scripts/run_phase1.py --model qwen35-4b --condition window_3

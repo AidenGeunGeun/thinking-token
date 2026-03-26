@@ -64,7 +64,7 @@ Total: 16 configurations.
 - Total: 160 task runs
 - Goal: qualitative exploration
 - Analysis mode: read trajectories, compare behavior, spot failure-mode differences
-- Budget target: about $5-7 on a single RunPod H100 SXM
+- Budget target: about $5-7 on RunPod (GPU-flexible, see Infrastructure)
 
 ## Phase 2
 
@@ -72,7 +72,7 @@ Future work only. If Phase 1 shows promising differences, expand to a larger tas
 
 ## Infrastructure
 
-- GPU: RunPod H100 SXM 80GB
+- GPU: RunPod, any card with >=48GB VRAM (H200 SXM, H100 SXM, RTX PRO 6000 all work; total cost is similar across cards since faster cards finish sooner)
 - Inference engine: llama.cpp (llama-server) with GGUF Q4_K_M
 - Server flags: `--jinja --flash-attn --n-gpu-layers 99 --reasoning-format none`
 - Custom chat template: preserves thinking in history (overrides Qwen3.5 default stripping)

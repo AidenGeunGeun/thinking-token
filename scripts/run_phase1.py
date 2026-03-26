@@ -24,10 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 CONFIG_PATH = PROJECT_ROOT / "configs" / "phase1.yaml"
 TASKS_PATH = PROJECT_ROOT / "configs" / "phase1_tasks.json"
 RESULTS_ROOT = PROJECT_ROOT / "results" / "phase1"
-
-LLAMA_SERVER = os.environ.get(
-    "LLAMA_SERVER_BIN", "/workspace/llama.cpp/build/bin/llama-server"
-)
+DEFAULT_LLAMA_SERVER = "/workspace/llama.cpp/build/bin/llama-server"
 
 
 @dataclass(frozen=True)
@@ -48,7 +45,7 @@ def utc_timestamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", default=str(CONFIG_PATH), help="path to phase1.yaml"
@@ -68,7 +65,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run", action="store_true", help="print the run plan only"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--smoke",
+        action="store_true",
+        help="run the first model, first condition, and first task only",
+    )
+    return parser.parse_args(argv)
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -124,9 +126,48 @@ def resolve_model_path(model: ModelConfig) -> str:
     )
 
 
-def build_llama_command(model_path: str, llama_config: dict[str, Any]) -> list[str]:
+def configured_llama_server() -> str:
+    return os.environ.get("LLAMA_SERVER_BIN", DEFAULT_LLAMA_SERVER)
+
+
+def is_executable_file(path: str) -> bool:
+    candidate = Path(path)
+    return candidate.is_file() and os.access(candidate, os.X_OK)
+
+
+def resolve_llama_server_bin() -> str:
+    configured = os.environ.get("LLAMA_SERVER_BIN")
+    if configured and is_executable_file(configured):
+        return configured
+
+    if is_executable_file(DEFAULT_LLAMA_SERVER):
+        return DEFAULT_LLAMA_SERVER
+
+    if configured:
+        raise SystemExit(
+            "LLAMA_SERVER_BIN points to "
+            f"{configured}, but neither it nor the default llama-server path is an "
+            "executable file: "
+            f"{DEFAULT_LLAMA_SERVER}"
+        )
+
+    raise SystemExit(
+        "llama-server not found. Set LLAMA_SERVER_BIN to an executable file or "
+        f"build the default binary at {DEFAULT_LLAMA_SERVER}"
+    )
+
+
+def validate_runtime_environment() -> str:
+    if not os.environ.get("GROQ_API_KEY"):
+        raise SystemExit("GROQ_API_KEY not set — needed for user simulator")
+    return resolve_llama_server_bin()
+
+
+def build_llama_command(
+    model_path: str, llama_config: dict[str, Any], llama_server: str
+) -> list[str]:
     return [
-        LLAMA_SERVER,
+        llama_server,
         "-m",
         model_path,
         "--port",
@@ -192,12 +233,15 @@ def print_plan(
     models: list[ModelConfig],
     conditions: list[ConditionConfig],
     task_ids: list[str],
+    *,
+    smoke: bool = False,
 ) -> None:
-    task_count = (
-        config["experiment"]["task_subset"]
-        if task_ids and task_ids[0].startswith("<select ")
-        else len(task_ids)
-    )
+    if smoke:
+        task_count = 1 if task_ids else 0
+    elif task_ids and task_ids[0].startswith("<select "):
+        task_count = config["experiment"]["task_subset"]
+    else:
+        task_count = len(task_ids)
     total_runs = (
         len(models) * len(conditions) * config["experiment"]["trials"] * task_count
     )
@@ -206,8 +250,10 @@ def print_plan(
         f"- benchmark: {config['experiment']['benchmark']} "
         f"({config['experiment']['domain']}/{config['experiment']['task_split']})"
     )
-    print(f"- server: llama.cpp ({LLAMA_SERVER})")
+    print(f"- server: llama.cpp ({configured_llama_server()})")
     print(f"- quantization: Q4_K_M (uniform)")
+    if smoke:
+        print("- mode: smoke (first model, first condition, first task only)")
     print(f"- models: {', '.join(model.short_name for model in models)}")
     print(f"- conditions: {', '.join(condition.name for condition in conditions)}")
     print(f"- task ids: {', '.join(task_ids)}")
@@ -226,7 +272,25 @@ def write_summary(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def apply_smoke_selection(
+    models: list[ModelConfig],
+    conditions: list[ConditionConfig],
+    task_ids: list[str],
+) -> tuple[list[ModelConfig], list[ConditionConfig], list[str]]:
+    smoke_models = models[:1]
+    smoke_conditions = conditions[:1]
+    smoke_tasks = task_ids[:1]
+    return smoke_models, smoke_conditions, smoke_tasks
+
+
 def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str, Any]]:
+    """Build terminal-state thinking metadata from completed trajectories.
+
+    `retained_at_end` reflects whether a turn's thinking is still present in the
+    final conversation state after the run finishes. Prompt-time retention is
+    applied separately at each LLM call by `src.thinking.apply_retention_strategy()`.
+    """
+
     from src.thinking import (
         count_thinking_tokens_approx,
         extract_thinking,
@@ -234,8 +298,16 @@ def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str
     )
 
     window_size = None
-    if condition.retention_strategy.startswith("window_"):
+    if condition.retention_strategy == "retain_all":
+        window_size = None
+    elif condition.retention_strategy == "strip_all":
+        window_size = None
+    elif condition.retention_strategy.startswith("window_"):
         window_size = int(condition.retention_strategy.split("_", 1)[1])
+    else:
+        raise ValueError(
+            f"Unsupported retention strategy: {condition.retention_strategy}"
+        )
 
     records: list[dict[str, Any]] = []
     for simulation in results.simulations:
@@ -307,12 +379,37 @@ def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str
                     "thinking_tokens_approx": count_thinking_tokens_approx(
                         combined_thinking
                     ),
-                    "retained_for_future_prompts": retained,
+                    "retained_at_end": retained,
                     "window_size": window_size,
                     "source": "tau2 trajectory",
                 }
             )
     return records
+
+
+def abort_on_thinking_contamination(run_dir: Path, summary: dict[str, Any]) -> None:
+    analysis_path = run_dir / "thinking_analysis.jsonl"
+    if not analysis_path.exists():
+        return
+
+    leaked = 0
+    for line in analysis_path.read_text(encoding="utf-8").splitlines():
+        rec = json.loads(line)
+        if rec.get("thinking_tokens_approx", 0) > 0:
+            leaked += 1
+
+    if not leaked:
+        return
+
+    print(
+        f"  WARNING: thinking_off leaked thinking in {leaked} turns — "
+        "baseline may be contaminated"
+    )
+    summary["contaminated"] = True
+    write_summary(run_dir / "summary.json", summary)
+    raise RuntimeError(
+        f"thinking_off contamination detected in {leaked} turns; aborting run"
+    )
 
 
 def save_thinking_analysis(run_dir: Path, results, condition: ConditionConfig) -> None:
@@ -388,26 +485,33 @@ def execute_condition_run(
         "task_ids": task_ids,
         "num_simulations": len(results.simulations),
         "full_reward_count": passed,
+        "contaminated": False,
         "generated_at": datetime.now(UTC).isoformat(),
     }
     write_summary(run_dir / "summary.json", summary)
     return summary
 
 
-def main() -> None:
-    args = parse_args()
+def main(args: argparse.Namespace) -> None:
     config = load_config(Path(args.config))
     models = load_models(config, args.model)
     conditions = load_conditions(config, args.condition)
     task_ids = load_task_ids(config)
 
-    print_plan(config, models, conditions, task_ids)
+    if args.smoke:
+        models, conditions, task_ids = apply_smoke_selection(
+            models, conditions, task_ids
+        )
+
+    print_plan(config, models, conditions, task_ids, smoke=args.smoke)
     if args.dry_run:
         return
     if task_ids and task_ids[0].startswith("<select "):
         raise SystemExit(
             "No task selection found. Run `python scripts/select_tasks.py` first."
         )
+
+    llama_server = validate_runtime_environment()
 
     # Ensure HF cache is on persistent volume (RunPod wipes /root/.cache on restart)
     if "HF_HOME" not in os.environ and Path("/workspace").exists():
@@ -430,7 +534,7 @@ def main() -> None:
             print(f"\nResolving GGUF path for {model.short_name}...")
             model_path = resolve_model_path(model)
             print(f"  -> {model_path}")
-            command = build_llama_command(model_path, llama_config)
+            command = build_llama_command(model_path, llama_config, llama_server)
             print(f"Starting llama-server for {model.short_name}: {' '.join(command)}")
             process = subprocess.Popen(
                 command,
@@ -463,18 +567,7 @@ def main() -> None:
 
                 # Validate: thinking_off should produce no thinking content
                 if not condition.enable_thinking:
-                    analysis_path = run_dir / "thinking_analysis.jsonl"
-                    if analysis_path.exists():
-                        leaked = 0
-                        for line in analysis_path.read_text().splitlines():
-                            rec = json.loads(line)
-                            if rec.get("thinking_tokens_approx", 0) > 0:
-                                leaked += 1
-                        if leaked:
-                            print(
-                                f"  WARNING: thinking_off leaked thinking in "
-                                f"{leaked} turns — baseline may be contaminated"
-                            )
+                    abort_on_thinking_contamination(run_dir, summary)
         finally:
             stop_process(process)
             log_handle.close()
@@ -487,7 +580,19 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    cli_args = parse_args()
     try:
-        main()
+        main(cli_args)
     except KeyboardInterrupt:
         raise SystemExit(130)
+    except BaseException as exc:
+        if cli_args.smoke:
+            message = str(exc)
+            if isinstance(exc, SystemExit):
+                code = exc.code
+                message = code if isinstance(code, str) else f"exit code {code}"
+            print(f"SMOKE TEST FAILED: {message}", file=sys.stderr)
+        raise
+    else:
+        if cli_args.smoke:
+            print("SMOKE TEST PASSED")

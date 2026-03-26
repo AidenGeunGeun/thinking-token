@@ -5,7 +5,7 @@ set -euo pipefail
 # RunPod setup for thinking-tokens experiment
 #
 # Prerequisites:
-#   - RunPod GPU Pod (L40S 48GB recommended)
+#   - RunPod GPU Pod (any card with >=48GB VRAM: H200 SXM, H100 SXM, RTX PRO 6000, etc.)
 #   - Any PyTorch or CUDA template
 #   - Volume size >= 100GB
 #   - Environment variables set in RunPod UI:
@@ -19,6 +19,11 @@ REPO_DIR="/workspace/thinking-tokens"
 VENV_DIR="/workspace/venv"
 HF_CACHE="/workspace/hf_cache"
 LLAMA_DIR="/workspace/llama.cpp"
+LLAMA_CPP_TAG="b8531"
+LLAMA_CPP_REF="c0159f9c1f874da15e94f371d136f5920b4b5335"
+TAU2_BENCH_REF="17e07b1da2bbc0cadfddeea36412686e0604127b"
+LITELLM_VERSION="1.82.6"
+HUGGINGFACE_HUB_VERSION="1.8.0"
 
 # --- Persistent HuggingFace cache -------------------------------------------
 export HF_HOME="$HF_CACHE"
@@ -34,19 +39,22 @@ grep -q 'HF_HOME=' /root/.bashrc 2>/dev/null || {
 apt-get update && apt-get install -y git curl cmake build-essential
 
 # --- Build llama.cpp with CUDA ---------------------------------------------
-if [[ -f "$LLAMA_DIR/build/bin/llama-server" ]]; then
-  echo "llama.cpp already built at $LLAMA_DIR"
-else
-  echo "Building llama.cpp with CUDA support..."
-  git clone https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR" 2>/dev/null || {
-    echo "Repo exists, pulling latest..."
-    git -C "$LLAMA_DIR" pull --ff-only || true
-  }
+if [[ ! -d "$LLAMA_DIR/.git" ]]; then
+  git clone https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
+fi
+
+git -C "$LLAMA_DIR" fetch --tags origin
+
+if [[ "$(git -C "$LLAMA_DIR" rev-parse HEAD 2>/dev/null || true)" != "$LLAMA_CPP_REF" || ! -x "$LLAMA_DIR/build/bin/llama-server" ]]; then
+  echo "Building llama.cpp $LLAMA_CPP_TAG ($LLAMA_CPP_REF) with CUDA support..."
+  git -C "$LLAMA_DIR" checkout --detach "$LLAMA_CPP_REF"
   cmake -B "$LLAMA_DIR/build" -S "$LLAMA_DIR" \
     -DGGML_CUDA=ON \
     -DCMAKE_BUILD_TYPE=Release
   cmake --build "$LLAMA_DIR/build" --config Release -j"$(nproc)"
   echo "llama.cpp built: $LLAMA_DIR/build/bin/llama-server"
+else
+  echo "llama.cpp already built at pinned ref $LLAMA_CPP_REF"
 fi
 
 # --- Python 3.12 via uv ----------------------------------------------------
@@ -65,8 +73,11 @@ fi
 echo "Python: $(python --version) at $(which python)"
 
 # --- Install Python dependencies -------------------------------------------
-echo "Installing tau2-bench and litellm..."
-uv pip install tau2-bench litellm huggingface-hub
+echo "Installing pinned runtime dependencies..."
+uv pip install \
+  "tau2-bench @ git+https://github.com/sierra-research/tau2-bench.git@$TAU2_BENCH_REF" \
+  "litellm==$LITELLM_VERSION" \
+  "huggingface-hub==$HUGGINGFACE_HUB_VERSION"
 
 # --- Clone and install project ----------------------------------------------
 if [[ ! -d "$REPO_DIR" ]]; then
@@ -147,5 +158,5 @@ echo "Next steps:"
 echo "  cd /workspace/thinking-tokens"
 echo "  python scripts/select_tasks.py"
 echo "  python scripts/run_phase1.py --dry-run"
-echo "  python scripts/run_phase1.py --model qwen35-0.8b --condition strip_all  # smoke test"
+echo "  python scripts/run_phase1.py --smoke"
 echo "  python scripts/run_phase1.py  # full run"

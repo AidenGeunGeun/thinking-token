@@ -33,7 +33,7 @@ One JSON object per turn.
   "assistant_message_count": 2,
   "thinking_text_chars": 812,
   "thinking_tokens_approx": 203,
-  "retained_for_future_prompts": true,
+  "retained_at_end": true,
   "window_size": 3,
   "source": "tau2 trajectory"
 }
@@ -48,8 +48,10 @@ One JSON object per turn.
 - `assistant_message_count`: number of assistant messages observed in the turn
 - `thinking_text_chars`: total extracted `<think>` text length for the turn
 - `thinking_tokens_approx`: rough token estimate using `len(text) // 4`
-- `retained_for_future_prompts`: whether this turn's thinking is retained under the configured strategy once later prompts are built
+- `retained_at_end`: whether this turn's thinking is still retained in the terminal conversation state after the run completes
 - `window_size`: integer for windowed strategies, otherwise `null`
 - `source`: provenance marker for downstream analysis
+
+`retained_at_end` reflects terminal state only. It does not mean the turn was unavailable to every later prompt; for windowed retention, turns can be retained for some intermediate prompts and later fall out of the window. Actual per-prompt retention is enforced at each LLM call by `src/thinking.py`'s `apply_retention_strategy()`.
 
 The analysis file is intentionally narrow: it complements tau2-bench trajectories instead of replacing them.
