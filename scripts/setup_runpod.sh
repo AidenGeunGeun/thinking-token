@@ -98,6 +98,19 @@ grep -q 'workspace/venv/bin/activate' /root/.bashrc 2>/dev/null || {
 
 export LLAMA_SERVER_BIN="$LLAMA_DIR/build/bin/llama-server"
 
+# --- Clone tau2-bench repo for task data ------------------------------------
+TAU2_REPO_DIR="/workspace/tau2-repo"
+if [[ ! -d "$TAU2_REPO_DIR/.git" ]]; then
+  echo "Cloning tau2-bench repo for task data..."
+  git clone https://github.com/sierra-research/tau2-bench.git "$TAU2_REPO_DIR"
+fi
+git -C "$TAU2_REPO_DIR" checkout "$TAU2_BENCH_REF"
+export TAU2_DATA_DIR="$TAU2_REPO_DIR/data"
+
+grep -q 'TAU2_DATA_DIR=' /root/.bashrc 2>/dev/null || {
+  echo "export TAU2_DATA_DIR=$TAU2_DATA_DIR" >> /root/.bashrc
+}
+
 # --- Verify installs --------------------------------------------------------
 echo ""
 echo "=== Verification ==="
@@ -132,7 +145,7 @@ os.environ.setdefault("HF_HOME", "/workspace/hf_cache")
 from huggingface_hub import hf_hub_download
 
 models = [
-    ("unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-Q8_0.gguf"),
+    ("unsloth/Qwen3.5-2B-GGUF", "Qwen3.5-2B-Q8_0.gguf"),
     ("unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-Q8_0.gguf"),
     ("unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q8_0.gguf"),
 ]

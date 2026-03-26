@@ -90,7 +90,7 @@ git -C "$TAU2_REPO_DIR" fetch origin
 git -C "$TAU2_REPO_DIR" checkout "$TAU2_BENCH_REF"
 
 export LLAMA_SERVER_BIN="$LLAMA_DIR/build/bin/llama-server"
-export TAU2_DATA_DIR="$TAU2_REPO_DIR"
+export TAU2_DATA_DIR="$TAU2_REPO_DIR/data"
 mkdir -p "$MODEL_DIR"
 
 echo ""
