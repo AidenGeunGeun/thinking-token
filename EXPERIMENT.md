@@ -73,7 +73,7 @@ A "turn" is everything between consecutive user messages. Within a single turn, 
 
 ### Retention Strategy (primary variable, applied when thinking is on)
 
-The `window_3` and `retain_all` conditions use the **summarizer as infrastructure**: after each turn, raw `<think>` blocks are extracted and summarized by a cheap external model. The summary replaces the raw thinking in conversation history. The raw thinking is never placed directly in history. The `strip_all` condition discards thinking entirely (no summarization cost).
+The `window_3` and `retain_all` conditions use the **summarizer as infrastructure**: after each assistant message, raw `<think>` blocks are extracted and summarized by a cheap external model. The summary replaces the raw thinking in conversation history. The raw thinking is never placed directly in history. The `strip_all` condition discards thinking entirely (no summarization cost).
 
 | Condition     | What's in conversation history                       | Cache behavior        |
 | ------------- | ---------------------------------------------------- | --------------------- |
@@ -84,9 +84,9 @@ The `window_3` and `retain_all` conditions use the **summarizer as infrastructur
 
 ### Thinking Summarizer
 
-The summarizer is infrastructure, not an independent variable. It runs after every assistant turn for all thinking-on conditions:
+The summarizer is infrastructure, not an independent variable. It runs after every assistant message for all thinking-on conditions:
 
-1. Model generates response with `<think>...</think>` block
+1. Model generates an assistant message with `<think>...</think>` block
 2. Raw thinking extracted
 3. Raw thinking sent to cheap external model (GPT-OSS-20B on Groq) for summarization
 4. Summary replaces raw thinking in conversation history, stored as: `<think_summary>...</think_summary>`
@@ -94,7 +94,7 @@ The summarizer is infrastructure, not an independent variable. It runs after eve
 
 The summarizer prompt should instruct the model to capture: what was being decided, what information was used, and what conclusion was reached.
 
-**Turn-finalization timing**: A turn ends when the next `UserMessage` arrives (or the task terminates). Within a single turn, the agent may produce multiple assistant messages interleaved with tool calls. All thinking from the entire turn is collected and summarized as one unit — not per assistant message.
+**Summarization timing**: Each assistant message with a `<think>` block is summarized independently. Within a single turn, the agent may produce multiple assistant messages interleaved with tool calls; each gets its own summary. This is simpler than per-turn aggregation, preserves the step-by-step structure of multi-step tool-use turns, and aligns with the agent's natural `_generate_next_message()` lifecycle.
 
 ### Model Scale
 

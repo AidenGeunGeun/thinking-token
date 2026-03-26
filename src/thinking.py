@@ -7,12 +7,37 @@ import re
 from typing import Any
 
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+THINK_SUMMARY_PATTERN = re.compile(r"<think_summary>(.*?)</think_summary>", re.DOTALL)
 WINDOW_PATTERN = re.compile(r"window_(\d+)")
+
+litellm = None
 
 
 def strip_thinking(content: str) -> str:
     """Remove all <think>...</think> blocks from content, preserving surrounding text."""
     return THINK_PATTERN.sub("", content)
+
+
+def strip_think_summary(content: str) -> str:
+    """Remove all <think_summary>...</think_summary> blocks from content."""
+    return THINK_SUMMARY_PATTERN.sub("", content)
+
+
+def strip_all_thinking_tags(content: str) -> str:
+    """Remove all <think> and <think_summary> blocks from content."""
+    return strip_think_summary(strip_thinking(content))
+
+
+def replace_thinking_with_summary(content: str, summary: str) -> str:
+    """Replace <think> blocks with a single summary block."""
+    if THINK_PATTERN.search(content) is None:
+        return content
+
+    visible_content = strip_thinking(content)
+    summary_block = f"<think_summary>{summary}</think_summary>"
+    if not visible_content:
+        return summary_block
+    return f"{summary_block}\n{visible_content}"
 
 
 def extract_thinking(content: str) -> tuple[str, str]:
@@ -25,6 +50,37 @@ def extract_thinking(content: str) -> tuple[str, str]:
 def count_thinking_tokens_approx(content: str) -> int:
     """Approximate token count for thinking content."""
     return len(content) // 4
+
+
+def summarize_thinking(thinking_text: str, model: str, prompt_template: str) -> str:
+    """Send raw thinking text to an external model for summarization.
+
+    Args:
+        thinking_text: Raw extracted thinking content (no tags).
+        model: LiteLLM model string, e.g. "groq/openai/gpt-oss-20b".
+        prompt_template: Template with {thinking_text} placeholder.
+
+    Returns:
+        Summarized text (no tags).
+
+    Raises:
+        Exception: If the litellm call fails (caller should handle fallback).
+    """
+    global litellm
+
+    if litellm is None:
+        import litellm as litellm_module  # type: ignore[import-not-found]
+
+        litellm = litellm_module
+
+    prompt = prompt_template.replace("{thinking_text}", thinking_text)
+    response = litellm.completion(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        max_tokens=2048,
+    )
+    return response.choices[0].message.content.strip()
 
 
 def _tau2_user_message_type() -> type[Any] | None:
@@ -112,6 +168,6 @@ def apply_retention_strategy(messages: list[Any], strategy: str) -> list[Any]:
             should_strip = turn_index is None or turn_index not in keep_turns
 
         if should_strip:
-            message.content = strip_thinking(content)
+            message.content = strip_all_thinking_tags(content)
 
     return retained_messages

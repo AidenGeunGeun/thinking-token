@@ -331,6 +331,21 @@ def apply_smoke_selection(
     return smoke_models, smoke_conditions, smoke_tasks
 
 
+def configure_condition_environment(
+    condition: ConditionConfig, config: dict[str, Any]
+) -> None:
+    os.environ["RETENTION_STRATEGY"] = condition.retention_strategy
+    os.environ["SUMMARIZE_THINKING"] = str(condition.summarize_thinking).lower()
+    if condition.summarize_thinking:
+        summarizer_config = config.get("summarizer", {})
+        os.environ["SUMMARIZER_MODEL"] = summarizer_config.get("model", "")
+        os.environ["SUMMARIZER_PROMPT"] = summarizer_config.get("prompt", "")
+    else:
+        os.environ["SUMMARIZE_THINKING"] = "false"
+        os.environ.pop("SUMMARIZER_MODEL", None)
+        os.environ.pop("SUMMARIZER_PROMPT", None)
+
+
 def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str, Any]]:
     """Build terminal-state thinking metadata from completed trajectories.
 
@@ -340,6 +355,7 @@ def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str
     """
 
     from src.thinking import (
+        THINK_SUMMARY_PATTERN,
         count_thinking_tokens_approx,
         extract_thinking,
         identify_turn_boundaries,
@@ -412,6 +428,17 @@ def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str
                         thinking_text.append(extracted)
 
             combined_thinking = "\n\n".join(thinking_text)
+            combined_summary = ""
+            if condition.summarize_thinking:
+                summary_blocks = []
+                for message in assistant_messages:
+                    content = getattr(message, "content", None)
+                    if isinstance(content, str):
+                        blocks = [
+                            m.strip() for m in THINK_SUMMARY_PATTERN.findall(content)
+                        ]
+                        summary_blocks.extend(block for block in blocks if block)
+                combined_summary = "\n\n".join(summary_blocks)
             retained = (
                 turn_index in keep_turns and assistant_counts_by_turn[turn_index] > 0
             )
@@ -423,12 +450,27 @@ def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str
                     "turn_index": turn_index,
                     "retention_strategy": condition.retention_strategy,
                     "assistant_message_count": len(assistant_messages),
-                    "thinking_text_chars": len(combined_thinking),
-                    "thinking_tokens_approx": count_thinking_tokens_approx(
+                    "raw_thinking_chars": len(combined_thinking),
+                    "raw_thinking_tokens_approx": count_thinking_tokens_approx(
                         combined_thinking
                     ),
+                    "summary_chars": (
+                        len(combined_summary) if condition.summarize_thinking else None
+                    ),
+                    "summary_tokens_approx": (
+                        count_thinking_tokens_approx(combined_summary)
+                        if condition.summarize_thinking
+                        else None
+                    ),
+                    "summarizer_input_tokens": None,
+                    "summarizer_output_tokens": None,
                     "retained_at_end": retained,
                     "window_size": window_size,
+                    "prompt_tokens_total": None,
+                    "prompt_tokens_cached": None,
+                    "prompt_tokens_evaluated": None,
+                    "generation_tokens": None,
+                    "thinking_tokens_in_generation": None,
                     "source": "tau2 trajectory",
                 }
             )
@@ -443,7 +485,10 @@ def abort_on_thinking_contamination(run_dir: Path, summary: dict[str, Any]) -> N
     leaked = 0
     for line in analysis_path.read_text(encoding="utf-8").splitlines():
         rec = json.loads(line)
-        if rec.get("thinking_tokens_approx", 0) > 0:
+        raw_tokens = rec.get("raw_thinking_tokens_approx")
+        if raw_tokens is None:
+            raw_tokens = rec.get("thinking_tokens_approx", 0)
+        if raw_tokens > 0:
             leaked += 1
 
     if not leaked:
@@ -601,7 +646,7 @@ def main(args: argparse.Namespace) -> None:
                     / f"{model.short_name}_{condition.name}_{run_timestamp}"
                 )
                 print(f"Running {model.short_name} / {condition.name} -> {run_dir}")
-                os.environ["RETENTION_STRATEGY"] = condition.retention_strategy
+                configure_condition_environment(condition, config)
                 summary = execute_condition_run(
                     run_dir=run_dir,
                     experiment=config["experiment"],
