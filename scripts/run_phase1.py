@@ -254,17 +254,56 @@ def agent_llm_name(model: ModelConfig) -> str:
     return f"openai/{model.short_name}"
 
 
+def _qwen_sampling_params(model: ModelConfig, enable_thinking: bool) -> dict[str, Any]:
+    """Return Qwen3.5 official recommended sampling params per model size and mode.
+
+    Source: each model's HuggingFace model card "Best Practices" section.
+    Task type: "general tasks" (τ²-bench is customer service, not coding).
+
+    0.8B/2B use different non-thinking params than 4B/9B.
+    Thinking params are identical across all sizes.
+    """
+    is_small = any(tag in model.short_name for tag in ("0.8b", "2b"))
+
+    if enable_thinking:
+        # Same for all sizes: thinking mode, general tasks
+        return {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "presence_penalty": 1.5,
+        }
+    elif is_small:
+        # 0.8B/2B: non-thinking mode, text tasks
+        return {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "presence_penalty": 2.0,
+        }
+    else:
+        # 4B/9B: instruct (non-thinking) mode, general tasks
+        return {
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "presence_penalty": 1.5,
+        }
+
+
 def agent_llm_args(
-    condition: ConditionConfig, port: int, config: dict[str, Any] | None = None
+    condition: ConditionConfig,
+    port: int,
+    model: ModelConfig,
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     max_tokens = 8192
     if config and "generation" in config:
         max_tokens = config["generation"].get("max_tokens", 8192)
+    sampling = _qwen_sampling_params(model, condition.enable_thinking)
     return {
         "api_base": f"http://127.0.0.1:{port}/v1",
         "api_key": "sk-no-key-required",
-        "temperature": 0.6,
-        "top_p": 0.95,
+        "temperature": sampling["temperature"],
+        "top_p": sampling["top_p"],
+        "presence_penalty": sampling["presence_penalty"],
         "max_tokens": max_tokens,
         "extra_body": {
             "top_k": 20,
@@ -307,10 +346,13 @@ def print_plan(
     print(f"- projected task runs: {total_runs}")
     for model in models:
         for condition in conditions:
+            sampling = _qwen_sampling_params(model, condition.enable_thinking)
             print(
                 f"  - {model.short_name} / {condition.name} | "
                 f"thinking={'on' if condition.enable_thinking else 'off'} | "
-                f"retention={condition.retention_strategy}"
+                f"retention={condition.retention_strategy} | "
+                f"temp={sampling['temperature']} top_p={sampling['top_p']} "
+                f"pp={sampling['presence_penalty']}"
             )
 
 
@@ -335,6 +377,10 @@ def configure_condition_environment(
 ) -> None:
     os.environ["RETENTION_STRATEGY"] = condition.retention_strategy
     os.environ["SUMMARIZE_THINKING"] = str(condition.summarize_thinking).lower()
+    # Rate-limit safety: 1s delay between turns to stay under Groq TPM limits
+    os.environ["TURN_DELAY_SECONDS"] = str(
+        config.get("generation", {}).get("turn_delay_seconds", 1.0)
+    )
     if condition.summarize_thinking:
         summarizer_config = config.get("summarizer", {})
         os.environ["SUMMARIZER_MODEL"] = summarizer_config.get("model", "")
@@ -545,7 +591,7 @@ def execute_condition_run(
         num_trials=experiment["trials"],
         agent="thinking_retention",
         llm_agent=agent_llm_name(model),
-        llm_args_agent=agent_llm_args(condition, port),
+        llm_args_agent=agent_llm_args(condition, port, model),
         user="user_simulator",
         llm_user=user_llm,
         llm_args_user={},

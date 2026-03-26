@@ -59,7 +59,8 @@
     "prompt": "Distill the following reasoning trace into a concise internal note. Capture: what was being decided, what information was used, and what conclusion was reached. The note should be proportional in length to the original reasoning — longer reasoning gets a longer summary, short reasoning gets a brief summary. This note will be provided to the model in future turns as context for its prior reasoning.\n\nReasoning trace:\n{thinking_text}"
   },
   "generation": {
-    "max_tokens": 8192
+    "max_tokens": 8192,
+    "turn_delay_seconds": 1.0
   },
   "llama": {
     "base_args": "--jinja --flash-attn on --n-gpu-layers 99 --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-format none --chat-template-file configs/chat_template.jinja",

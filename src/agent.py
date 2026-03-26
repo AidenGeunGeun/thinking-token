@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 try:
@@ -50,6 +51,7 @@ from .thinking import (
     apply_retention_strategy,
     extract_thinking,
     replace_thinking_with_summary,
+    strip_thinking,
     summarize_thinking,
 )
 
@@ -145,6 +147,7 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
         )
         self.summarizer_model = os.environ.get("SUMMARIZER_MODEL", "")
         self.summarizer_prompt = os.environ.get("SUMMARIZER_PROMPT", "")
+        self.turn_delay = float(os.environ.get("TURN_DELAY_SECONDS", "0"))
 
     def _maybe_summarize_thinking(self, assistant_message: Any) -> Any:
         """Replace raw <think> blocks with <think_summary> if enabled."""
@@ -178,6 +181,26 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
 
         return assistant_message
 
+    def _strip_thinking_for_history(self, assistant_message: Any) -> Any:
+        """Strip raw <think> blocks from message content before tau2 appends to history.
+
+        tau2's generate_next_message() appends the returned message to
+        state.messages AFTER we return it.  If raw <think> blocks remain,
+        the user simulator (and any other consumer of state.messages) will
+        see them, causing massive token bloat.
+
+        For summarizing conditions, _maybe_summarize_thinking() already
+        replaced <think> with <think_summary> — this catches the rest
+        (strip_all condition, or summarizer failures).
+        """
+        if _has_tool_calls(assistant_message):
+            return assistant_message
+        content = getattr(assistant_message, "content", None)
+        if not content or "<think>" not in content:
+            return assistant_message
+        assistant_message.content = strip_thinking(content).strip()
+        return assistant_message
+
     def _generate_next_message(self, message: Any, state: Any) -> Any:
         if isinstance(message, UserMessage) and message.is_audio:
             raise ValueError("User message cannot be audio. Use VoiceLLMAgent instead.")
@@ -199,4 +222,8 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
             **self.llm_args,
         )
         assistant_message = _restore_thinking_blocks(assistant_message)
-        return self._maybe_summarize_thinking(assistant_message)
+        assistant_message = self._maybe_summarize_thinking(assistant_message)
+        assistant_message = self._strip_thinking_for_history(assistant_message)
+        if self.turn_delay > 0:
+            time.sleep(self.turn_delay)
+        return assistant_message

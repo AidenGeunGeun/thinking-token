@@ -93,7 +93,7 @@ def print_summary_table(runs: list[dict]) -> None:
         key = (r.get("model", "?"), r.get("condition", "?"))
         grid[key] = r
 
-    hdr = f"{'Model':<20} {'Condition':<14} {'Pass':<6} {'N':<4} {'Rate':<7} {'Avg Dur':<9} {'Avg Msgs':<10} {'Termination Reasons'}"
+    hdr = f"{'Model':<20} {'Condition':<14} {'Pass':<6} {'N':<4} {'Rate':<7} {'Infra':<7} {'Avg Dur':<9} {'Avg Msgs':<10} {'Termination Reasons'}"
     print("=" * len(hdr))
     print(hdr)
     print("-" * len(hdr))
@@ -105,17 +105,20 @@ def print_summary_table(runs: list[dict]) -> None:
                 r = grid[key]
                 passed = r.get("full_reward_count", 0)
                 total = r.get("num_simulations", 0)
-                rate = f"{passed / total * 100:.0f}%" if total > 0 else "-"
+                terms = r.get("_term_counts", {})
+                infra = terms.get("infrastructure_error", 0)
+                clean = total - infra
+                rate = f"{passed / clean * 100:.0f}%" if clean > 0 else "-"
+                infra_str = f"({infra})" if infra > 0 else ""
                 avg_dur = f"{r.get('_avg_duration', 0):.0f}s"
                 avg_msgs = f"{r.get('_avg_messages', 0):.0f}"
-                terms = r.get("_term_counts", {})
                 term_str = ", ".join(f"{k}:{v}" for k, v in sorted(terms.items()))
                 print(
-                    f"{model:<20} {condition:<14} {passed:<6} {total:<4} {rate:<7} {avg_dur:<9} {avg_msgs:<10} {term_str}"
+                    f"{model:<20} {condition:<14} {passed:<6} {clean:<4} {rate:<7} {infra_str:<7} {avg_dur:<9} {avg_msgs:<10} {term_str}"
                 )
             else:
                 print(
-                    f"{model:<20} {condition:<14} {'·':<6} {'·':<4} {'·':<7} {'·':<9} {'·':<10}"
+                    f"{model:<20} {condition:<14} {'·':<6} {'·':<4} {'·':<7} {'·':<7} {'·':<9} {'·':<10}"
                 )
         print()
 
