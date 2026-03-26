@@ -9,9 +9,9 @@
   },
   "models": [
     {
-      "hf_repo": "unsloth/Qwen3.5-0.8B-GGUF",
-      "hf_file": "Qwen3.5-0.8B-Q8_0.gguf",
-      "short_name": "qwen35-0.8b"
+      "hf_repo": "unsloth/Qwen3.5-2B-GGUF",
+      "hf_file": "Qwen3.5-2B-Q8_0.gguf",
+      "short_name": "qwen35-2b"
     },
     {
       "hf_repo": "unsloth/Qwen3.5-4B-GGUF",
@@ -72,7 +72,7 @@
   },
   "generation": {
     "max_tokens": 8192,
-    "turn_delay_seconds": 1.0
+    "turn_delay_seconds": 0.0
   },
   "llama": {
     "base_args": "--jinja --flash-attn on --n-gpu-layers 99 --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-format none --chat-template-file configs/chat_template.jinja",
