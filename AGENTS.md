@@ -61,9 +61,19 @@ ThinkingRetentionAgent
         +--> next turn: model sees summarized thinking from prior turns
 ```
 
-### Key Design Decision: Summarizer as Infrastructure
+### Key Design Decision: Agent-Private Thinking State
 
-Raw `<think>` blocks (4K-32K+ tokens) are never placed in conversation history. Instead, every thinking-on condition uses a summarizer that distills thinking into concise summaries proportional to the original length. The retention strategy then controls *which* summaries remain in history. This mirrors Anthropic's architecture (separate summarizer model) but is accessible to the open-source ecosystem.
+**Phase 1 lesson**: Thinking artifacts (`<think_summary>` blocks) leaked to the user simulator via τ²-bench's shared `state.messages`, causing the user sim to mimic formal summary structure, fabricate tool results, and break role boundaries. See EXPERIMENT.md Phase 1 Findings for full analysis.
+
+**Phase 2 fix**: The agent maintains TWO views of conversation history:
+1. **Internal state**: Contains thinking artifacts (raw `<think>` or `<think_summary>`). Used when building the prompt for the agent model.
+2. **External message**: Returned to τ²-bench with ALL thinking artifacts stripped. This is what the user simulator sees.
+
+The retention strategy operates on the internal state only. The user sim always gets clean text.
+
+### Summary Format
+
+Summaries must be **first-person stream-of-consciousness** — the model recalling its own reasoning. NOT formal structured notes with bold headers and bullet points. See EXPERIMENT.md Phase 2 "Summary Format" section for examples.
 
 ## Commands
 
@@ -97,6 +107,11 @@ bash scripts/setup_runpod.sh
 python -m unittest discover -s tests
 ```
 
+## Lessons Learned
+
+- **Verify message visibility before any GPU run.** Phase 1 burned hours of L40S time because `<think_summary>` leaked to the user sim. A 5-minute smoke test checking what each participant sees would have caught this. See EXPERIMENT.md "Smoke Test Protocol" — all 5 checks must pass before starting real runs.
+- **The user sim matters.** GPT-OSS-20B was chosen for cost but caused role confusion, result fabrication, and garbage tool calls. Phase 2 uses DeepSeek V3.2 — the cost difference ($0.30 vs $0.38 per M output) is negligible compared to GPU rental.
+
 ## Conventions
 
 - Use Python 3.12+ syntax and standard type hints.
@@ -104,4 +119,5 @@ python -m unittest discover -s tests
 - Never mutate prior message history in place when applying retention strategies.
 - Keep RunPod scripts idempotent where practical.
 - Prefer small, explicit JSON and YAML outputs over custom binary artifacts.
-- Raw thinking is never placed directly in conversation history; always summarize first.
+- Thinking artifacts (raw or summarized) MUST NOT leak to the user simulator. Strip from returned messages; retain only in agent's internal state.
+- Summary format: first-person stream-of-consciousness, NOT formal structured notes.
