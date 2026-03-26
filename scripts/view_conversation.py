@@ -43,7 +43,7 @@ def wrap(text: str, indent: str = "  ", width: int = WIDTH) -> str:
     return "\n".join(wrapped)
 
 
-def format_thinking(content: str) -> str:
+def format_thinking(content: str) -> list:
     """Extract and format thinking blocks from content."""
     parts = []
     last_end = 0
@@ -204,9 +204,29 @@ def find_latest_results(base: Path) -> Path | None:
     return dirs[0].parent if dirs else None
 
 
+def print_agent_snapshot(snapshot_path: Path, show_full_thinking: bool = False) -> None:
+    """Print the agent's internal message view (what the LLM actually sees)."""
+    data = json.loads(snapshot_path.read_text())
+    if not isinstance(data, list):
+        print(f"Unexpected snapshot format in {snapshot_path}", file=sys.stderr)
+        return
+
+    print(f"\n{BOLD}{'═' * WIDTH}{RESET}")
+    print(f"{BOLD}AGENT INTERNAL VIEW  —  {snapshot_path.name}{RESET}")
+    print(f"{DIM}(This is what the agent LLM sees in its context window){RESET}")
+    print(f"{BOLD}{'═' * WIDTH}{RESET}")
+
+    for i, msg in enumerate(data):
+        print_message(i, msg, show_full_thinking=show_full_thinking)
+
+    print()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("path", nargs="?", help="result dir or results.json path")
+    parser.add_argument(
+        "path", nargs="?", help="result dir, results.json, or verify condition name"
+    )
     parser.add_argument(
         "--sim", type=int, default=0, help="simulation index (default: 0)"
     )
@@ -221,15 +241,54 @@ def main() -> None:
     parser.add_argument(
         "--latest", action="store_true", help="show the most recent result"
     )
+    parser.add_argument(
+        "--agent-view",
+        action="store_true",
+        help="show the agent's internal context (with retained thinking/summaries) instead of the public view",
+    )
+    parser.add_argument(
+        "--both",
+        action="store_true",
+        help="show both agent internal view and public (user sim) view side by side",
+    )
     args = parser.parse_args()
 
     results_base = Path("results/phase1")
+    verify_base = Path("results/verify")
+
+    # --agent-view or --both with a condition name: load from results/verify/
+    if args.path and (args.agent_view or args.both):
+        condition_name = args.path
+        snapshot_path = verify_base / f"agent_snapshot_{condition_name}.json"
+        public_path = verify_base / f"results_{condition_name}.json"
+
+        if snapshot_path.exists() and (args.agent_view or args.both):
+            print_agent_snapshot(snapshot_path, show_full_thinking=args.full_thinking)
+
+        if public_path.exists() and (not args.agent_view or args.both):
+            data = json.loads(public_path.read_text())
+            sims = data.get("simulations", [])
+            if sims:
+                print(f"\n{BOLD}{'═' * WIDTH}{RESET}")
+                print(f"{BOLD}USER SIM VIEW  —  results_{condition_name}.json{RESET}")
+                print(
+                    f"{DIM}(This is what the user simulator / tau2 history contains — no thinking){RESET}"
+                )
+                print_simulation(sims[0], show_full_thinking=args.full_thinking)
+        return
 
     if args.path:
         path = Path(args.path)
         if path.is_file():
             results_path = path
         elif path.is_dir():
+            if args.agent_view:
+                snap = path / "agent_internal_snapshot.json"
+                if snap.exists():
+                    print_agent_snapshot(snap, show_full_thinking=args.full_thinking)
+                    return
+                print(f"No agent_internal_snapshot.json in {path}", file=sys.stderr)
+                sys.exit(1)
             results_path = path / "results.json"
         else:
             print(f"Not found: {path}", file=sys.stderr)
@@ -243,8 +302,8 @@ def main() -> None:
         print(f"{DIM}Using: {results_path}{RESET}")
     else:
         # List all available
-        print(f"{BOLD}Available result directories:{RESET}")
-        for d in sorted(results_base.iterdir()):
+        print(f"{BOLD}Available result directories (phase1):{RESET}")
+        for d in sorted(results_base.iterdir()) if results_base.exists() else []:
             if (d / "results.json").exists():
                 summary_path = d / "summary.json"
                 if summary_path.exists():
@@ -254,7 +313,18 @@ def main() -> None:
                     print(f"  {d.name}  ({reward}/{total} passed)")
                 else:
                     print(f"  {d.name}")
+        if verify_base.exists():
+            snapshots = sorted(verify_base.glob("agent_snapshot_*.json"))
+            if snapshots:
+                print(
+                    f"\n{BOLD}Available verify snapshots (use --both <condition>):{RESET}"
+                )
+                for s in snapshots:
+                    cname = s.stem.replace("agent_snapshot_", "")
+                    print(f"  {cname}")
         print(f"\nUsage: python {sys.argv[0]} <dir> [--sim N] [--full-thinking]")
+        print(f"       python {sys.argv[0]} --both <condition>   # e.g. summary_retain")
+        print(f"       python {sys.argv[0]} --agent-view <condition>")
         return
 
     data = json.loads(results_path.read_text())

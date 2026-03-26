@@ -408,6 +408,15 @@ def verify_condition(
                 f"Expected exactly 1 simulation for {condition.name}, got {len(results.simulations)}"
             )
 
+        # Persist results and internal snapshot before tempdir is deleted
+        import shutil as _shutil
+
+        persistent_results = verify_dir / f"results_{condition.name}.json"
+        persistent_snapshot = verify_dir / f"agent_snapshot_{condition.name}.json"
+        if (run_dir / "results.json").exists():
+            _shutil.copy(run_dir / "results.json", persistent_results)
+        _shutil.copy(snapshot_path, persistent_snapshot)
+
         simulation = results.simulations[0]
         report = evaluate_invariants(
             condition,
