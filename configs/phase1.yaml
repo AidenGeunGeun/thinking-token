@@ -10,17 +10,17 @@
   "models": [
     {
       "hf_repo": "unsloth/Qwen3.5-0.8B-GGUF",
-      "hf_file": "Qwen3.5-0.8B-Q4_K_M.gguf",
+      "hf_file": "Qwen3.5-0.8B-Q8_0.gguf",
       "short_name": "qwen35-0.8b"
     },
     {
       "hf_repo": "unsloth/Qwen3.5-4B-GGUF",
-      "hf_file": "Qwen3.5-4B-Q4_K_M.gguf",
+      "hf_file": "Qwen3.5-4B-Q8_0.gguf",
       "short_name": "qwen35-4b"
     },
     {
       "hf_repo": "unsloth/Qwen3.5-9B-GGUF",
-      "hf_file": "Qwen3.5-9B-Q4_K_M.gguf",
+      "hf_file": "Qwen3.5-9B-Q8_0.gguf",
       "short_name": "qwen35-9b"
     }
   ],
@@ -62,7 +62,7 @@
     "max_tokens": 8192
   },
   "llama": {
-    "base_args": "--jinja --flash-attn on --n-gpu-layers 99 --ctx-size 131072 --reasoning-format none --chat-template-file configs/chat_template.jinja",
+    "base_args": "--jinja --flash-attn on --n-gpu-layers 99 --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-format none --chat-template-file configs/chat_template.jinja",
     "port": 8080
   }
 }

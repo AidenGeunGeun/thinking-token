@@ -5,7 +5,7 @@ set -euo pipefail
 # RunPod setup for thinking-tokens experiment
 #
 # Prerequisites:
-#   - RunPod GPU Pod (any card with >=48GB VRAM: H200 SXM, H100 SXM, RTX PRO 6000, etc.)
+#   - RunPod GPU Pod (any card with >=48GB VRAM: L40S, H100, A100, etc.)
 #   - Any PyTorch or CUDA template
 #   - Volume size >= 100GB
 #   - Environment variables set in RunPod UI:
@@ -19,11 +19,11 @@ REPO_DIR="/workspace/thinking-tokens"
 VENV_DIR="/workspace/venv"
 HF_CACHE="/workspace/hf_cache"
 LLAMA_DIR="/workspace/llama.cpp"
-LLAMA_CPP_TAG="b8531"
-LLAMA_CPP_REF="c0159f9c1f874da15e94f371d136f5920b4b5335"
+LLAMA_CPP_TAG="latest"
+LLAMA_CPP_REF=""  # empty = use HEAD
 TAU2_BENCH_REF="17e07b1da2bbc0cadfddeea36412686e0604127b"
 LITELLM_VERSION="1.82.6"
-HUGGINGFACE_HUB_VERSION="1.8.0"
+HUGGINGFACE_HUB_VERSION="0.33.0"
 
 # --- Persistent HuggingFace cache -------------------------------------------
 export HF_HOME="$HF_CACHE"
@@ -45,16 +45,15 @@ fi
 
 git -C "$LLAMA_DIR" fetch --tags origin
 
-if [[ "$(git -C "$LLAMA_DIR" rev-parse HEAD 2>/dev/null || true)" != "$LLAMA_CPP_REF" || ! -x "$LLAMA_DIR/build/bin/llama-server" ]]; then
-  echo "Building llama.cpp $LLAMA_CPP_TAG ($LLAMA_CPP_REF) with CUDA support..."
-  git -C "$LLAMA_DIR" checkout --detach "$LLAMA_CPP_REF"
+if [[ ! -x "$LLAMA_DIR/build/bin/llama-server" ]]; then
+  echo "Building llama.cpp (HEAD) with CUDA support..."
   cmake -B "$LLAMA_DIR/build" -S "$LLAMA_DIR" \
     -DGGML_CUDA=ON \
     -DCMAKE_BUILD_TYPE=Release
   cmake --build "$LLAMA_DIR/build" --config Release -j"$(nproc)"
   echo "llama.cpp built: $LLAMA_DIR/build/bin/llama-server"
 else
-  echo "llama.cpp already built at pinned ref $LLAMA_CPP_REF"
+  echo "llama.cpp already built"
 fi
 
 # --- Python 3.12 via uv ----------------------------------------------------
@@ -133,10 +132,9 @@ os.environ.setdefault("HF_HOME", "/workspace/hf_cache")
 from huggingface_hub import hf_hub_download
 
 models = [
-    ("unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-Q4_K_M.gguf"),
-    ("unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-Q4_K_M.gguf"),
-    ("unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q4_K_M.gguf"),
-    ("unsloth/Qwen3.5-35B-A3B-GGUF", "Qwen3.5-35B-A3B-Q4_K_M.gguf"),
+    ("unsloth/Qwen3.5-0.8B-GGUF", "Qwen3.5-0.8B-Q8_0.gguf"),
+    ("unsloth/Qwen3.5-4B-GGUF", "Qwen3.5-4B-Q8_0.gguf"),
+    ("unsloth/Qwen3.5-9B-GGUF", "Qwen3.5-9B-Q8_0.gguf"),
 ]
 for repo, filename in models:
     try:

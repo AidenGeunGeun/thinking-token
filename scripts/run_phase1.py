@@ -33,10 +33,9 @@ def _register_model_costs() -> None:
 
         # Local models — free (GPU cost is tracked separately)
         for name in [
-            "Qwen3.5-0.8B-Q4_K_M.gguf",
-            "Qwen3.5-4B-Q4_K_M.gguf",
-            "Qwen3.5-9B-Q4_K_M.gguf",
-            "Qwen3.5-35B-A3B-Q4_K_M.gguf",
+            "Qwen3.5-0.8B-Q8_0.gguf",
+            "Qwen3.5-4B-Q8_0.gguf",
+            "Qwen3.5-9B-Q8_0.gguf",
         ]:
             litellm.model_cost[name] = {
                 "input_cost_per_token": 0.0,
@@ -299,7 +298,7 @@ def print_plan(
         f"({config['experiment']['domain']}/{config['experiment']['task_split']})"
     )
     print(f"- server: llama.cpp ({configured_llama_server()})")
-    print(f"- quantization: Q4_K_M (uniform)")
+    print(f"- quantization: Q8_0 (uniform)")
     if smoke:
         print("- mode: smoke (first model, first condition, first task only)")
     print(f"- models: {', '.join(model.short_name for model in models)}")

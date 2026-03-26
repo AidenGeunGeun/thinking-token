@@ -151,7 +151,7 @@ Future work contingent on Phase 1 results:
 ## Infrastructure
 
 - **GPU**: RunPod, any card with >=48GB VRAM (H200 SXM, H100 SXM, RTX PRO 6000 all work; cost is ~$4-7 total regardless of card choice since faster cards finish sooner)
-- **Inference engine**: llama.cpp (llama-server) with GGUF Q4_K_M
+- **Inference engine**: llama.cpp (llama-server) with GGUF Q8_0, KV cache Q8_0
 - **Custom chat template**: `configs/chat_template.jinja` disables Qwen3.5's built-in thinking stripping (so our Python code controls retention, not the Jinja template)
 - **User simulator**: GPT-OSS-20B on Groq
 - **Thinking summarizer**: GPT-OSS-20B on Groq (same model, separate calls)

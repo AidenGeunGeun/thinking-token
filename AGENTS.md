@@ -13,7 +13,7 @@ Phase 1: tau2-bench integration and RunPod workflow for 10-task qualitative swee
 ## Environment
 
 - Hardware target: RunPod, >=48GB VRAM (H200 SXM, H100 SXM, or RTX PRO 6000)
-- Inference: llama.cpp (llama-server) with GGUF Q4_K_M
+- Inference: llama.cpp (llama-server) with GGUF Q8_0, KV cache Q8_0
 - Python: 3.12+
 
 ## Dependencies
