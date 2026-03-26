@@ -38,25 +38,37 @@
       "summarize_thinking": false
     },
     {
-      "name": "window_3",
+      "name": "raw_window3",
+      "enable_thinking": true,
+      "retention_strategy": "window_3",
+      "summarize_thinking": false
+    },
+    {
+      "name": "raw_retain",
+      "enable_thinking": true,
+      "retention_strategy": "retain_all",
+      "summarize_thinking": false
+    },
+    {
+      "name": "summary_window3",
       "enable_thinking": true,
       "retention_strategy": "window_3",
       "summarize_thinking": true
     },
     {
-      "name": "retain_all",
+      "name": "summary_retain",
       "enable_thinking": true,
       "retention_strategy": "retain_all",
       "summarize_thinking": true
     }
   ],
   "user_sim": {
-    "model": "openai/gpt-oss-20b",
-    "provider": "groq"
+    "model": "xiaomi/mimo-v2-flash",
+    "provider": "openrouter"
   },
   "summarizer": {
-    "model": "groq/openai/gpt-oss-20b",
-    "prompt": "Distill the following reasoning trace into a concise internal note. Capture: what was being decided, what information was used, and what conclusion was reached. The note should be proportional in length to the original reasoning — longer reasoning gets a longer summary, short reasoning gets a brief summary. This note will be provided to the model in future turns as context for its prior reasoning.\n\nReasoning trace:\n{thinking_text}"
+    "model": "openrouter/xiaomi/mimo-v2-flash",
+    "prompt": "You are an AI assistant mid-task. Below is what happened in your last turn:\n\nCUSTOMER MESSAGE:\n{user_message}\n\nYOUR REASONING:\n{thinking_text}\n\nYOUR RESPONSE:\n{response_text}\n\nCondense your reasoning into natural first-person thought — the way you think to yourself while working through a problem. Write as yourself: direct, flowing, \"I checked their account...\", \"I need to ask them to...\". No headers, bullet points, or formal structure. Length proportional to the original reasoning."
   },
   "generation": {
     "max_tokens": 8192,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Phase 1: 10 telecom tasks x 3 models x 4 conditions = 120 runs."""
+"""Run Phase 1: 10 telecom tasks x 3 models x 6 conditions = 180 runs."""
 
 from __future__ import annotations
 
@@ -44,15 +44,12 @@ def _register_model_costs() -> None:
             }
             litellm.model_cost[f"openai/{name}"] = litellm.model_cost[name]
 
-        # Groq GPT-OSS-20B — user simulator
-        litellm.model_cost["groq/openai/gpt-oss-20b"] = {
-            "input_cost_per_token": 0.000000075,
+        # OpenRouter MiMo V2 Flash — user simulator and summarizer
+        litellm.model_cost["openrouter/xiaomi/mimo-v2-flash"] = {
+            "input_cost_per_token": 0.0000001,
             "output_cost_per_token": 0.0000003,
             "max_tokens": 131072,
         }
-        litellm.model_cost["openai/gpt-oss-20b"] = litellm.model_cost[
-            "groq/openai/gpt-oss-20b"
-        ]
     except ImportError:
         pass
 
@@ -199,8 +196,10 @@ def resolve_llama_server_bin() -> str:
 
 
 def validate_runtime_environment() -> str:
-    if not os.environ.get("GROQ_API_KEY"):
-        raise SystemExit("GROQ_API_KEY not set — needed for user simulator")
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        raise SystemExit(
+            "OPENROUTER_API_KEY not set — needed for user simulator and summarizer"
+        )
     return resolve_llama_server_bin()
 
 
@@ -338,6 +337,8 @@ def print_plan(
     )
     print(f"- server: llama.cpp ({configured_llama_server()})")
     print(f"- quantization: Q8_0 (uniform)")
+    print(f"- user sim: {user_model_name(config)}")
+    print(f"- projected configs: {len(models) * len(conditions)}")
     if smoke:
         print("- mode: smoke (first model, first condition, first task only)")
     print(f"- models: {', '.join(model.short_name for model in models)}")
@@ -377,7 +378,7 @@ def configure_condition_environment(
 ) -> None:
     os.environ["RETENTION_STRATEGY"] = condition.retention_strategy
     os.environ["SUMMARIZE_THINKING"] = str(condition.summarize_thinking).lower()
-    # Rate-limit safety: 1s delay between turns to stay under Groq TPM limits
+    # Rate-limit safety: 1s delay between turns to stay under OpenRouter TPM limits
     os.environ["TURN_DELAY_SECONDS"] = str(
         config.get("generation", {}).get("turn_delay_seconds", 1.0)
     )

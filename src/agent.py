@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import time
@@ -106,6 +107,75 @@ def _is_assistant_message(message: Any) -> bool:
         getattr(message, "role", None) == "assistant"
         or message.__class__.__name__ == "AssistantMessage"
     )
+
+
+def _is_user_message(message: Any) -> bool:
+    role = getattr(message, "role", None)
+    return role == "user" or message.__class__.__name__ == "UserMessage"
+
+
+def _is_tool_message(message: Any) -> bool:
+    role = getattr(message, "role", None)
+    return role == "tool" or message.__class__.__name__ == "ToolMessage"
+
+
+def _stringify_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    try:
+        return json.dumps(content, ensure_ascii=True, sort_keys=True, default=str)
+    except TypeError:
+        return str(content)
+
+
+def _stringify_multitool_message(message: Any) -> str:
+    parts: list[str] = []
+    for tool_message in getattr(message, "tool_messages", []):
+        content = getattr(tool_message, "content", None)
+        if content is None:
+            continue
+        text = _stringify_content(content).strip()
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _stringify_tool_messages(messages: list[Any]) -> str:
+    parts: list[str] = []
+    for message in messages:
+        content = getattr(message, "content", None)
+        if content is None:
+            continue
+        text = _stringify_content(content).strip()
+        if text:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _last_context_message_text(messages: list[Any]) -> str:
+    tool_messages: list[Any] = []
+    for message in reversed(messages):
+        if isinstance(message, MultiToolMessage):
+            return _stringify_multitool_message(message)
+
+        if _is_tool_message(message):
+            tool_messages.append(message)
+            continue
+
+        if tool_messages:
+            return _stringify_tool_messages(list(reversed(tool_messages)))
+
+        if not _is_user_message(message):
+            continue
+
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content:
+            return content
+
+    if tool_messages:
+        return _stringify_tool_messages(list(reversed(tool_messages)))
+
+    return ""
 
 
 def _public_message_signature(message: Any) -> tuple[str | None, str | None, Any]:
@@ -224,11 +294,16 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
         if not thinking_text:
             return assistant_message
 
+        user_message = _last_context_message_text(self._internal_messages)
+        response_text = strip_all_thinking_tags(content)
+
         try:
             summary = summarize_thinking(
                 thinking_text,
                 self.summarizer_model,
                 self.summarizer_prompt,
+                user_message=user_message,
+                response_text=response_text,
             )
             assistant_message.content = replace_thinking_with_summary(content, summary)
         except Exception:

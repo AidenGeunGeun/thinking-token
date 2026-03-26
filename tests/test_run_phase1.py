@@ -55,7 +55,7 @@ class RunPhase1Test(unittest.TestCase):
             ]
         )
         condition = run_phase1.ConditionConfig(
-            name="window_3",
+            name="raw_window3",
             enable_thinking=True,
             retention_strategy="window_3",
         )
@@ -132,7 +132,7 @@ class RunPhase1Test(unittest.TestCase):
             ]
         )
         condition = run_phase1.ConditionConfig(
-            name="window_3",
+            name="summary_window3",
             enable_thinking=True,
             retention_strategy="window_3",
             summarize_thinking=True,
@@ -148,12 +148,16 @@ class RunPhase1Test(unittest.TestCase):
     def test_configure_condition_environment_sets_summarizer_env_vars(self) -> None:
         config = {
             "summarizer": {
-                "model": "groq/openai/gpt-oss-20b",
-                "prompt": "Distill: {thinking_text}",
+                "model": "openrouter/xiaomi/mimo-v2-flash",
+                "prompt": (
+                    "Customer: {user_message}\n"
+                    "Reasoning: {thinking_text}\n"
+                    "Response: {response_text}"
+                ),
             }
         }
         condition = run_phase1.ConditionConfig(
-            name="window_3",
+            name="summary_window3",
             enable_thinking=True,
             retention_strategy="window_3",
             summarize_thinking=True,
@@ -164,9 +168,16 @@ class RunPhase1Test(unittest.TestCase):
 
             self.assertEqual(os.environ["RETENTION_STRATEGY"], "window_3")
             self.assertEqual(os.environ["SUMMARIZE_THINKING"], "true")
-            self.assertEqual(os.environ["SUMMARIZER_MODEL"], "groq/openai/gpt-oss-20b")
             self.assertEqual(
-                os.environ["SUMMARIZER_PROMPT"], "Distill: {thinking_text}"
+                os.environ["SUMMARIZER_MODEL"], "openrouter/xiaomi/mimo-v2-flash"
+            )
+            self.assertEqual(
+                os.environ["SUMMARIZER_PROMPT"],
+                (
+                    "Customer: {user_message}\n"
+                    "Reasoning: {thinking_text}\n"
+                    "Response: {response_text}"
+                ),
             )
 
     def test_configure_condition_environment_clears_summarizer_env_vars(self) -> None:
@@ -194,7 +205,7 @@ class RunPhase1Test(unittest.TestCase):
 
     def test_condition_config_summarize_thinking_field(self) -> None:
         condition = run_phase1.ConditionConfig(
-            name="window_3",
+            name="summary_window3",
             enable_thinking=True,
             retention_strategy="window_3",
             summarize_thinking=True,
@@ -230,7 +241,7 @@ class RunPhase1Test(unittest.TestCase):
         )
         self.assertEqual(smoke_tasks, ["task-1"])
 
-    def test_validate_runtime_environment_requires_groq_api_key(self) -> None:
+    def test_validate_runtime_environment_requires_openrouter_api_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             llama_server = Path(tmpdir) / "llama-server"
             llama_server.write_text("", encoding="utf-8")
@@ -242,7 +253,7 @@ class RunPhase1Test(unittest.TestCase):
                 with mock.patch.dict(os.environ, {}, clear=True):
                     with self.assertRaisesRegex(
                         SystemExit,
-                        "GROQ_API_KEY not set",
+                        "OPENROUTER_API_KEY not set",
                     ):
                         run_phase1.validate_runtime_environment()
 

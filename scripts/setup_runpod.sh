@@ -9,7 +9,7 @@ set -euo pipefail
 #   - Any PyTorch or CUDA template
 #   - Volume size >= 100GB
 #   - Environment variables set in RunPod UI:
-#       GROQ_API_KEY=gsk_...
+#       OPENROUTER_API_KEY=sk-or-...
 #       HF_TOKEN=hf_...
 # =============================================================================
 
@@ -111,8 +111,8 @@ echo "  llama-server: $LLAMA_DIR/build/bin/llama-server"
 python - <<'PY'
 import os
 errors = []
-if not os.environ.get("GROQ_API_KEY"):
-    errors.append("GROQ_API_KEY not set — needed for user simulator")
+if not os.environ.get("OPENROUTER_API_KEY"):
+    errors.append("OPENROUTER_API_KEY not set — needed for OpenRouter user simulator and summarizer")
 if not os.environ.get("HF_TOKEN"):
     errors.append("HF_TOKEN not set — may be needed for model downloads")
 if errors:

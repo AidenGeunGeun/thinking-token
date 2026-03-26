@@ -28,8 +28,12 @@ class AgentSummarizationTest(unittest.TestCase):
         env = {
             "RETENTION_STRATEGY": "retain_all",
             "SUMMARIZE_THINKING": "true",
-            "SUMMARIZER_MODEL": "groq/openai/gpt-oss-20b",
-            "SUMMARIZER_PROMPT": "Distill: {thinking_text}",
+            "SUMMARIZER_MODEL": "openrouter/xiaomi/mimo-v2-flash",
+            "SUMMARIZER_PROMPT": (
+                "Customer: {user_message}\n"
+                "Reasoning: {thinking_text}\n"
+                "Response: {response_text}"
+            ),
         }
         if env_overrides:
             env.update(env_overrides)
@@ -72,6 +76,81 @@ class AgentSummarizationTest(unittest.TestCase):
         self.assertIn("<think_summary>Short summary</think_summary>", result.content)
         self.assertNotIn("<think>", result.content)
         self.assertIn("The answer is 42", result.content)
+
+    def test_summarize_passes_last_user_message_and_visible_response(self):
+        agent = self._make_agent()
+        agent._internal_messages = [
+            MockMessage(role="user", content="Can you check why I was charged twice?")
+        ]
+        msg = MockMessage(
+            role="assistant",
+            content="<think>Investigate duplicate charge</think>I found the duplicate charge.",
+        )
+
+        with patch(
+            "src.agent.summarize_thinking", return_value="Short summary"
+        ) as mock_sum:
+            agent._maybe_summarize_thinking(msg)
+
+        mock_sum.assert_called_once_with(
+            "Investigate duplicate charge",
+            "openrouter/xiaomi/mimo-v2-flash",
+            "Customer: {user_message}\nReasoning: {thinking_text}\nResponse: {response_text}",
+            user_message="Can you check why I was charged twice?",
+            response_text="I found the duplicate charge.",
+        )
+
+    def test_summarize_stringifies_flattened_tool_turn_context(self):
+        agent = self._make_agent()
+        agent._internal_messages = [
+            MockMessage(role="assistant", content="Prior answer"),
+            SimpleNamespace(role="tool", content={"account_id": "12345"}),
+            SimpleNamespace(role="tool", content="Plan status: active"),
+        ]
+        msg = MockMessage(
+            role="assistant",
+            content="<think>Review tool output</think>Your account is active.",
+        )
+
+        with patch(
+            "src.agent.summarize_thinking", return_value="Short summary"
+        ) as mock_sum:
+            agent._maybe_summarize_thinking(msg)
+
+        mock_sum.assert_called_once_with(
+            "Review tool output",
+            "openrouter/xiaomi/mimo-v2-flash",
+            "Customer: {user_message}\nReasoning: {thinking_text}\nResponse: {response_text}",
+            user_message='{"account_id": "12345"}\n\nPlan status: active',
+            response_text="Your account is active.",
+        )
+
+    def test_summarize_stringifies_multitool_context(self):
+        agent = self._make_agent()
+        agent_module = importlib.import_module("src.agent")
+        multi_tool_message = agent_module.MultiToolMessage()
+        multi_tool_message.tool_messages = [
+            SimpleNamespace(role="tool", content={"account_id": "12345"}),
+            SimpleNamespace(role="tool", content="Plan status: active"),
+        ]
+        agent._internal_messages = [multi_tool_message]
+        msg = MockMessage(
+            role="assistant",
+            content="<think>Review tool output</think>Your account is active.",
+        )
+
+        with patch(
+            "src.agent.summarize_thinking", return_value="Short summary"
+        ) as mock_sum:
+            agent._maybe_summarize_thinking(msg)
+
+        mock_sum.assert_called_once_with(
+            "Review tool output",
+            "openrouter/xiaomi/mimo-v2-flash",
+            "Customer: {user_message}\nReasoning: {thinking_text}\nResponse: {response_text}",
+            user_message='{"account_id": "12345"}\n\nPlan status: active',
+            response_text="Your account is active.",
+        )
 
     def test_summarize_disabled_returns_unchanged(self):
         agent = self._make_agent({"SUMMARIZE_THINKING": "false"})

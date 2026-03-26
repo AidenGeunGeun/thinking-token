@@ -52,13 +52,27 @@ def count_thinking_tokens_approx(content: str) -> int:
     return len(content) // 4
 
 
-def summarize_thinking(thinking_text: str, model: str, prompt_template: str) -> str:
+def _replace_placeholder(prompt: str, placeholder: str, value: str) -> str:
+    if placeholder not in prompt:
+        return prompt
+    return prompt.replace(placeholder, value or "(not available)")
+
+
+def summarize_thinking(
+    thinking_text: str,
+    model: str,
+    prompt_template: str,
+    user_message: str = "",
+    response_text: str = "",
+) -> str:
     """Send raw thinking text to an external model for summarization.
 
     Args:
         thinking_text: Raw extracted thinking content (no tags).
-        model: LiteLLM model string, e.g. "groq/openai/gpt-oss-20b".
-        prompt_template: Template with {thinking_text} placeholder.
+        model: LiteLLM model string, e.g. "openrouter/xiaomi/mimo-v2-flash".
+        prompt_template: Template with {thinking_text} and optional context placeholders.
+        user_message: User or tool context from the previous turn.
+        response_text: Visible assistant response for the current turn.
 
     Returns:
         Summarized text (no tags).
@@ -73,7 +87,10 @@ def summarize_thinking(thinking_text: str, model: str, prompt_template: str) -> 
 
         litellm = litellm_module
 
-    prompt = prompt_template.replace("{thinking_text}", thinking_text)
+    prompt = prompt_template
+    prompt = _replace_placeholder(prompt, "{user_message}", user_message)
+    prompt = _replace_placeholder(prompt, "{thinking_text}", thinking_text)
+    prompt = _replace_placeholder(prompt, "{response_text}", response_text)
     response = litellm.completion(
         model=model,
         messages=[{"role": "user", "content": prompt}],

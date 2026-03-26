@@ -62,16 +62,47 @@ class ThinkingUtilsTest(unittest.TestCase):
 
         result = summarize_thinking(
             "long reasoning text",
-            "groq/openai/gpt-oss-20b",
-            "Distill: {thinking_text}",
+            "openrouter/xiaomi/mimo-v2-flash",
+            (
+                "Customer: {user_message}\n"
+                "Reasoning: {thinking_text}\n"
+                "Response: {response_text}"
+            ),
+            user_message="I need help with my bill.",
+            response_text="I found the charge and can explain it.",
         )
 
         self.assertEqual(result, "Summary result")
         mock_litellm.completion.assert_called_once()
         call_kwargs = mock_litellm.completion.call_args
-        self.assertIn(
-            "long reasoning text", call_kwargs.kwargs["messages"][0]["content"]
+        prompt = call_kwargs.kwargs["messages"][0]["content"]
+        self.assertIn("long reasoning text", prompt)
+        self.assertIn("I need help with my bill.", prompt)
+        self.assertIn("I found the charge and can explain it.", prompt)
+
+    @patch("src.thinking.litellm")
+    def test_summarize_thinking_fills_missing_optional_context(
+        self, mock_litellm: MagicMock
+    ) -> None:
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Summary"
+        mock_litellm.completion.return_value = mock_response
+
+        summarize_thinking(
+            "reasoning text",
+            "openrouter/xiaomi/mimo-v2-flash",
+            (
+                "Customer: {user_message}\n"
+                "Reasoning: {thinking_text}\n"
+                "Response: {response_text}"
+            ),
         )
+
+        prompt = mock_litellm.completion.call_args.kwargs["messages"][0]["content"]
+        self.assertIn("Customer: (not available)", prompt)
+        self.assertIn("Reasoning: reasoning text", prompt)
+        self.assertIn("Response: (not available)", prompt)
 
     def test_identify_turn_boundaries_uses_user_messages(self) -> None:
         messages = [
