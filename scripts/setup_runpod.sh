@@ -75,7 +75,7 @@ echo "Python: $(python --version) at $(which python)"
 # --- Install Python dependencies -------------------------------------------
 echo "Installing pinned runtime dependencies..."
 uv pip install \
-  "tau2-bench @ git+https://github.com/sierra-research/tau2-bench.git@$TAU2_BENCH_REF" \
+  "tau2 @ git+https://github.com/sierra-research/tau2-bench.git@$TAU2_BENCH_REF" \
   "litellm==$LITELLM_VERSION" \
   "huggingface-hub==$HUGGINGFACE_HUB_VERSION"
 
