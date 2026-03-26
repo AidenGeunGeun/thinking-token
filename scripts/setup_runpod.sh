@@ -36,7 +36,7 @@ grep -q 'HF_HOME=' /root/.bashrc 2>/dev/null || {
 }
 
 # --- System packages --------------------------------------------------------
-apt-get update && apt-get install -y git curl cmake build-essential
+apt-get update && apt-get install -y git curl cmake build-essential portaudio19-dev libsndfile1
 
 # --- Build llama.cpp with CUDA ---------------------------------------------
 if [[ ! -d "$LLAMA_DIR/.git" ]]; then
@@ -75,7 +75,7 @@ echo "Python: $(python --version) at $(which python)"
 # --- Install Python dependencies -------------------------------------------
 echo "Installing pinned runtime dependencies..."
 uv pip install \
-  "tau2 @ git+https://github.com/sierra-research/tau2-bench.git@$TAU2_BENCH_REF" \
+  "tau2[voice] @ git+https://github.com/sierra-research/tau2-bench.git@$TAU2_BENCH_REF" \
   "litellm==$LITELLM_VERSION" \
   "huggingface-hub==$HUGGINGFACE_HUB_VERSION"
 
