@@ -104,6 +104,34 @@ class AgentSummarizationTest(unittest.TestCase):
         result = agent._maybe_summarize_thinking(msg)
         self.assertIsNone(result.content)
 
+    def test_tool_call_message_skips_summarization(self):
+        agent = self._make_agent()
+        msg = MockMessage(
+            role="assistant",
+            content="<think>reasoning about tool</think>",
+            tool_calls=[{"name": "get_customer", "arguments": "{}"}],
+        )
+        result = agent._maybe_summarize_thinking(msg)
+        # Should be unchanged — tool-call messages are never summarized
+        self.assertEqual(result.content, "<think>reasoning about tool</think>")
+
+    def test_restore_thinking_blocks_skips_tool_calls(self):
+        """_restore_thinking_blocks should not inject thinking into tool-call messages."""
+        import importlib
+
+        agent_module = importlib.import_module("src.agent")
+        msg = MockMessage(
+            role="assistant",
+            content=None,
+            tool_calls=[{"name": "get_customer", "arguments": "{}"}],
+            raw_data={
+                "choices": [{"message": {"reasoning": "deep thoughts about tools"}}]
+            },
+        )
+        result = agent_module._restore_thinking_blocks(msg)
+        # Content should remain None — don't inject thinking into tool-call messages
+        self.assertIsNone(result.content)
+
 
 if __name__ == "__main__":
     unittest.main()

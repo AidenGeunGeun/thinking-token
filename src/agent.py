@@ -93,7 +93,15 @@ def _extract_reasoning(raw_data: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _has_tool_calls(message: Any) -> bool:
+    tool_calls = getattr(message, "tool_calls", None)
+    return tool_calls is not None
+
+
 def _restore_thinking_blocks(message: Any) -> Any:
+    if _has_tool_calls(message):
+        return message
+
     content = message.content or ""
     if "<think>" in content:
         return message
@@ -141,6 +149,9 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
     def _maybe_summarize_thinking(self, assistant_message: Any) -> Any:
         """Replace raw <think> blocks with <think_summary> if enabled."""
         if not self.summarize_thinking:
+            return assistant_message
+
+        if _has_tool_calls(assistant_message):
             return assistant_message
 
         content = getattr(assistant_message, "content", None)
