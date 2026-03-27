@@ -83,3 +83,15 @@ These fields track the real compute cost per LLM call, which varies by retention
 `retained_at_end` reflects terminal state only. It does not mean the turn was unavailable to every later prompt; for windowed retention, turns can be retained for some intermediate prompts and later fall out of the window. Actual per-prompt retention is enforced at each LLM call by `src/thinking.py`'s `apply_retention_strategy()`.
 
 The analysis file is intentionally narrow: it complements tau2-bench trajectories instead of replacing them.
+
+## Known Issues
+
+### thinking_analysis.jsonl records all zeros (Phase 1)
+
+In the current codebase, `build_thinking_records()` in `run_phase1.py` reads from the messages stored in `results.json` — which is the **public view** (all thinking already stripped by `_strip_thinking_for_history()`). As a result, `raw_thinking_chars`, `raw_thinking_tokens_approx`, `summary_chars`, and `summary_tokens_approx` are all zero across every condition.
+
+The agent's internal state (`_internal_messages`) where thinking/summaries are preserved is not captured in any output file. To fix this, the agent would need to log its internal state separately before stripping, or `build_thinking_records()` would need access to the pre-stripped messages.
+
+### No agent-view data in results
+
+`results.json` contains only the user-sim-visible view (clean text). Raw `<think>` blocks and `<think_summary>` blocks generated during inference are not preserved in any output file. Conversation analysis must rely on behavioral patterns observable in the public view (tool call sequences, agent responses, termination reasons).

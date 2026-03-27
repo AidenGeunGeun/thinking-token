@@ -28,6 +28,7 @@ export TAU2_DATA_DIR=~/tau2-repo/data  # NOTE: must be /data subdir, not repo ro
 ```
 thinking-tokens/
 ├── EXPERIMENT.md             # Research design, hypotheses, cost estimates
+├── PHASE1_RESULTS.md         # Full Phase 1 results with per-task matrix and conversation analysis
 ├── DATA_SCHEMA.md            # Output schema
 ├── configs/
 │   ├── phase1.yaml           # Models, conditions, server config
