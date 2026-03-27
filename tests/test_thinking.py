@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 from src.thinking import (
+    SummarizationResult,
     apply_retention_strategy,
     extract_thinking,
     identify_turn_boundaries,
@@ -58,6 +59,9 @@ class ThinkingUtilsTest(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "  Summary result  "
+        mock_response.usage = MagicMock()
+        mock_response.usage.prompt_tokens = 123
+        mock_response.usage.completion_tokens = 45
         mock_litellm.completion.return_value = mock_response
 
         result = summarize_thinking(
@@ -72,7 +76,10 @@ class ThinkingUtilsTest(unittest.TestCase):
             response_text="I found the charge and can explain it.",
         )
 
-        self.assertEqual(result, "Summary result")
+        self.assertIsInstance(result, SummarizationResult)
+        self.assertEqual(result.summary, "Summary result")
+        self.assertEqual(result.input_tokens, 123)
+        self.assertEqual(result.output_tokens, 45)
         mock_litellm.completion.assert_called_once()
         call_kwargs = mock_litellm.completion.call_args
         prompt = call_kwargs.kwargs["messages"][0]["content"]
@@ -87,9 +94,10 @@ class ThinkingUtilsTest(unittest.TestCase):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "Summary"
+        mock_response.usage = None
         mock_litellm.completion.return_value = mock_response
 
-        summarize_thinking(
+        result = summarize_thinking(
             "reasoning text",
             "openrouter/xiaomi/mimo-v2-flash",
             (
@@ -99,6 +107,9 @@ class ThinkingUtilsTest(unittest.TestCase):
             ),
         )
 
+        self.assertEqual(result.summary, "Summary")
+        self.assertIsNone(result.input_tokens)
+        self.assertIsNone(result.output_tokens)
         prompt = mock_litellm.completion.call_args.kwargs["messages"][0]["content"]
         self.assertIn("Customer: (not available)", prompt)
         self.assertIn("Reasoning: reasoning text", prompt)

@@ -91,10 +91,11 @@ User sim always sees clean text — thinking artifacts exist only in the agent's
 The summarizer runs after each assistant message for `summary_window3` and `summary_retain` conditions only. It does NOT run for `raw_window3`, `raw_retain`, `strip_all`, or `thinking_off`.
 
 1. Model generates an assistant message with `<think>...</think>` block
-2. Raw thinking extracted
-3. Raw thinking sent to cheap external model (GPT-OSS-20B on Groq) for summarization
+2. Raw thinking extracted; char/token counts captured to agent-side accumulator
+3. Raw thinking + user context + agent response sent to cheap external model (MiMo-V2 Flash on OpenRouter) for summarization
 4. Summary replaces raw thinking in conversation history, stored as: `<think_summary>...</think_summary>`
-5. Summary length is proportional to raw thinking length (not fixed)
+5. Summarizer token usage (input/output) captured from litellm response
+6. Summary length is proportional to raw thinking length (not fixed)
 
 The summarizer prompt should instruct the model to capture: what was being decided, what information was used, and what conclusion was reached.
 
@@ -114,7 +115,7 @@ All dense models from the same architecture family. Clean scaling curve.
 
 3 models x 6 conditions x 10 tasks x 1 trial = **180 task runs** (Phase 1)
 
-2B and 4B run locally on Mac M4 Pro. 9B runs on RunPod L40S.
+2B and 4B run locally on Mac M4 Pro. 9B runs on RunPod L40S. Runs support checkpoint/resume (`--fresh` to re-run).
 
 ## Cache Accounting
 

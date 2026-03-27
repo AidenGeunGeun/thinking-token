@@ -91,9 +91,10 @@ python scripts/verify_pipeline.py --model qwen35-2b --condition summary_retain -
 
 # Dry-run and real runs
 python scripts/run_phase1.py --dry-run
-python scripts/run_phase1.py --model qwen35-2b
+python scripts/run_phase1.py --model qwen35-2b        # resumes automatically, skips completed conditions
 python scripts/run_phase1.py --model qwen35-4b
-python scripts/run_phase1.py --model qwen35-9b   # RunPod only
+python scripts/run_phase1.py --model qwen35-9b         # RunPod only
+python scripts/run_phase1.py --model qwen35-4b --fresh  # ignore existing results, re-run everything
 
 # View results
 python scripts/view_results.py
@@ -111,3 +112,5 @@ python -m pytest tests/ -x
 - `select_tasks.py` is deterministic — same 10 tasks every run, no random seed needed.
 - Log everything; results are expensive to regenerate. Raw outputs and thinking analysis are saved per run.
 - Keep tau2 integration thin — compose around `LLMAgent`, don't fork framework logic.
+- Runs are resumable — `summary.json` marks a condition as complete. Ctrl+C stops after the current condition; partial directories are cleaned up.
+- Thinking metrics come from the agent-side accumulator (`src/agent._thinking_records`), not from `results.json` (which only has the public view).

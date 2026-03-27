@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+from src.thinking import SummarizationResult
+
 
 @dataclass
 class MockMessage:
@@ -24,6 +26,22 @@ class MockMessage:
 
 class AgentSummarizationTest(unittest.TestCase):
     """Test _maybe_summarize_thinking method."""
+
+    def setUp(self) -> None:
+        importlib.import_module("src.agent").clear_thinking_records()
+
+    @staticmethod
+    def _summary_result(
+        summary: str = "Short summary",
+        *,
+        input_tokens: int | None = 11,
+        output_tokens: int | None = 7,
+    ) -> SummarizationResult:
+        return SummarizationResult(
+            summary=summary,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
 
     def _make_agent(self, env_overrides: dict[str, str] | None = None):
         """Create a ThinkingRetentionAgent with mocked tau2 dependencies."""
@@ -72,7 +90,10 @@ class AgentSummarizationTest(unittest.TestCase):
             content="<think>long reasoning</think>The answer is 42",
         )
 
-        with patch("src.agent.summarize_thinking", return_value="Short summary"):
+        with patch(
+            "src.agent.summarize_thinking",
+            return_value=self._summary_result("Short summary"),
+        ):
             result = agent._maybe_summarize_thinking(msg)
 
         self.assertIn("<think_summary>Short summary</think_summary>", result.content)
@@ -90,7 +111,8 @@ class AgentSummarizationTest(unittest.TestCase):
         )
 
         with patch(
-            "src.agent.summarize_thinking", return_value="Short summary"
+            "src.agent.summarize_thinking",
+            return_value=self._summary_result("Short summary"),
         ) as mock_sum:
             agent._maybe_summarize_thinking(msg)
 
@@ -115,7 +137,8 @@ class AgentSummarizationTest(unittest.TestCase):
         )
 
         with patch(
-            "src.agent.summarize_thinking", return_value="Short summary"
+            "src.agent.summarize_thinking",
+            return_value=self._summary_result("Short summary"),
         ) as mock_sum:
             agent._maybe_summarize_thinking(msg)
 
@@ -142,7 +165,8 @@ class AgentSummarizationTest(unittest.TestCase):
         )
 
         with patch(
-            "src.agent.summarize_thinking", return_value="Short summary"
+            "src.agent.summarize_thinking",
+            return_value=self._summary_result("Short summary"),
         ) as mock_sum:
             agent._maybe_summarize_thinking(msg)
 
@@ -241,7 +265,10 @@ class AgentSummarizationTest(unittest.TestCase):
 
         with (
             patch("src.agent.generate", return_value=generated),
-            patch("src.agent.summarize_thinking", return_value="Short summary"),
+            patch(
+                "src.agent.summarize_thinking",
+                return_value=self._summary_result("Short summary"),
+            ),
         ):
             returned = agent._generate_next_message(incoming, state)
 
@@ -252,6 +279,78 @@ class AgentSummarizationTest(unittest.TestCase):
             "<think_summary>Short summary</think_summary>\nThe answer is 42",
         )
         self.assertIsNot(agent._internal_messages[1], returned)
+
+    def test_generate_next_message_accumulates_record_and_clear_resets(self):
+        agent_module = importlib.import_module("src.agent")
+        agent = self._make_agent()
+        state = self._make_state()
+        incoming = MockMessage(role="user", content="What is 6 * 7?")
+        generated = MockMessage(
+            role="assistant",
+            content="<think>long reasoning</think>The answer is 42",
+        )
+
+        with (
+            patch("src.agent.generate", return_value=generated),
+            patch(
+                "src.agent.summarize_thinking",
+                return_value=self._summary_result(
+                    "Short summary",
+                    input_tokens=31,
+                    output_tokens=9,
+                ),
+            ),
+        ):
+            returned = agent._generate_next_message(incoming, state)
+
+        self.assertEqual(returned.content, "The answer is 42")
+        self.assertEqual(
+            agent_module.get_thinking_records(),
+            [
+                {
+                    "raw_thinking_chars": len("long reasoning"),
+                    "raw_thinking_tokens_approx": len("long reasoning") // 4,
+                    "summary_chars": len("Short summary"),
+                    "summary_tokens_approx": len("Short summary") // 4,
+                    "summarizer_input_tokens": 31,
+                    "summarizer_output_tokens": 9,
+                    "has_tool_calls": False,
+                }
+            ],
+        )
+
+        agent_module.clear_thinking_records()
+        self.assertEqual(agent_module.get_thinking_records(), [])
+
+    def test_generate_next_message_records_tool_call_without_thinking_metrics(self):
+        agent_module = importlib.import_module("src.agent")
+        agent = self._make_agent({"SUMMARIZE_THINKING": "false"})
+        state = self._make_state()
+        incoming = MockMessage(role="user", content="Find the account")
+        generated = MockMessage(
+            role="assistant",
+            content="<think>lookup plan</think>Calling tool",
+            tool_calls=[{"name": "get_customer", "arguments": "{}"}],
+        )
+
+        with patch("src.agent.generate", return_value=generated):
+            returned = agent._generate_next_message(incoming, state)
+
+        self.assertEqual(returned.content, "Calling tool")
+        self.assertEqual(
+            agent_module.get_thinking_records(),
+            [
+                {
+                    "raw_thinking_chars": 0,
+                    "raw_thinking_tokens_approx": 0,
+                    "summary_chars": None,
+                    "summary_tokens_approx": None,
+                    "summarizer_input_tokens": None,
+                    "summarizer_output_tokens": None,
+                    "has_tool_calls": True,
+                }
+            ],
+        )
 
     def test_generate_next_message_seeds_internal_history_from_existing_state(self):
         agent = self._make_agent({"SUMMARIZE_THINKING": "false"})

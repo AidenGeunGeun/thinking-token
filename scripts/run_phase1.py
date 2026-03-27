@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 import shlex
+import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -66,6 +68,7 @@ CONFIG_PATH = PROJECT_ROOT / "configs" / "phase1.yaml"
 TASKS_PATH = PROJECT_ROOT / "configs" / "phase1_tasks.json"
 RESULTS_ROOT = PROJECT_ROOT / "results" / "phase1"
 DEFAULT_LLAMA_SERVER = "/workspace/llama.cpp/build/bin/llama-server"
+_shutdown_requested = False
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--smoke",
         action="store_true",
         help="run the first model, first condition, and first task only",
+    )
+    parser.add_argument(
+        "--fresh",
+        action="store_true",
+        help="ignore existing results and rerun all selected conditions",
     )
     return parser.parse_args(argv)
 
@@ -396,6 +404,126 @@ def configure_condition_environment(
         os.environ.pop("SUMMARIZER_PROMPT", None)
 
 
+def completed_condition_runs(
+    results_root: Path,
+    model_short_name: str,
+    condition_name: str,
+    *,
+    task_ids: list[str] | None = None,
+    trials: int | None = None,
+) -> list[Path]:
+    pattern = f"{model_short_name}_{condition_name}_*/summary.json"
+    matches: list[Path] = []
+    for summary_path in sorted(results_root.glob(pattern)):
+        if task_ids is None and trials is None:
+            matches.append(summary_path)
+            continue
+        try:
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("contaminated"):
+            continue
+        if task_ids is not None and payload.get("task_ids") != task_ids:
+            continue
+        if (
+            trials is not None
+            and payload.get("num_simulations") != len(task_ids or []) * trials
+        ):
+            continue
+        matches.append(summary_path)
+    return matches
+
+
+def collect_completed_conditions(
+    results_root: Path,
+    models: list[ModelConfig],
+    conditions: list[ConditionConfig],
+    task_ids: list[str],
+    trials: int,
+) -> list[tuple[str, str]]:
+    completed: list[tuple[str, str]] = []
+    for model in models:
+        for condition in conditions:
+            if completed_condition_runs(
+                results_root,
+                model.short_name,
+                condition.name,
+                task_ids=task_ids,
+                trials=trials,
+            ):
+                completed.append((model.short_name, condition.name))
+    return completed
+
+
+def print_resume_summary(completed: list[tuple[str, str]]) -> None:
+    if not completed:
+        print("Starting fresh: 0 completed conditions found")
+        return
+    print(f"Resuming: skipping {len(completed)} completed conditions")
+    for model_short_name, condition_name in completed:
+        print(f"- {model_short_name} / {condition_name}")
+
+
+def cleanup_partial_run(run_dir: Path) -> None:
+    summary_path = run_dir / "summary.json"
+    if not run_dir.exists() or summary_path.exists():
+        return
+    shutil.rmtree(run_dir)
+    print(f"Cleaned up partial run: {run_dir.name}")
+
+
+def execute_condition_run_with_cleanup(
+    run_dir: Path,
+    experiment: dict[str, Any],
+    user_llm: str,
+    model: ModelConfig,
+    condition: ConditionConfig,
+    task_ids: list[str],
+    port: int,
+) -> dict[str, Any]:
+    try:
+        return execute_condition_run(
+            run_dir=run_dir,
+            experiment=experiment,
+            user_llm=user_llm,
+            model=model,
+            condition=condition,
+            task_ids=task_ids,
+            port=port,
+        )
+    except BaseException:
+        cleanup_partial_run(run_dir)
+        raise
+
+
+def request_graceful_shutdown(_signum: int, frame: Any) -> None:
+    del frame
+    global _shutdown_requested
+    if _shutdown_requested:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        signal.default_int_handler(signal.SIGINT, None)
+        return
+    _shutdown_requested = True
+    print(
+        "\nGraceful shutdown requested. Will stop after current condition.\n"
+        "Press Ctrl+C again to force quit.",
+        flush=True,
+    )
+
+
+def exit_if_shutdown_requested(completed_this_session: list[str]) -> None:
+    if not _shutdown_requested:
+        return
+    print("Graceful shutdown complete. Completed this session:")
+    if completed_this_session:
+        for label in completed_this_session:
+            print(f"- {label}")
+    else:
+        print("- None")
+    sys.exit(0)
+
+
 def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str, Any]]:
     """Build terminal-state thinking metadata from completed trajectories.
 
@@ -527,6 +655,69 @@ def build_thinking_records(results, condition: ConditionConfig) -> list[dict[str
     return records
 
 
+def _sum_optional_agent_values(
+    agent_records: list[dict[str, Any]], field: str
+) -> int | None:
+    values = [
+        value for record in agent_records if (value := record.get(field)) is not None
+    ]
+    if not values:
+        return None
+    return sum(values)
+
+
+def merge_agent_thinking_records(
+    records: list[dict[str, Any]], agent_records: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    merged_records: list[dict[str, Any]] = []
+    agent_idx = 0
+
+    for record in records:
+        assistant_count = int(record["assistant_message_count"])
+        if assistant_count == 0:
+            merged_records.append(record)
+            continue
+
+        next_agent_idx = agent_idx + assistant_count
+        if next_agent_idx > len(agent_records):
+            raise ValueError(
+                "Agent thinking records do not align with trajectory assistant messages"
+            )
+
+        turn_agent_records = agent_records[agent_idx:next_agent_idx]
+        agent_idx = next_agent_idx
+
+        merged_record = dict(record)
+        merged_record["raw_thinking_chars"] = sum(
+            int(agent_record.get("raw_thinking_chars", 0))
+            for agent_record in turn_agent_records
+        )
+        merged_record["raw_thinking_tokens_approx"] = sum(
+            int(agent_record.get("raw_thinking_tokens_approx", 0))
+            for agent_record in turn_agent_records
+        )
+        merged_record["summary_chars"] = _sum_optional_agent_values(
+            turn_agent_records, "summary_chars"
+        )
+        merged_record["summary_tokens_approx"] = _sum_optional_agent_values(
+            turn_agent_records, "summary_tokens_approx"
+        )
+        merged_record["summarizer_input_tokens"] = _sum_optional_agent_values(
+            turn_agent_records, "summarizer_input_tokens"
+        )
+        merged_record["summarizer_output_tokens"] = _sum_optional_agent_values(
+            turn_agent_records, "summarizer_output_tokens"
+        )
+        merged_records.append(merged_record)
+
+    if agent_idx != len(agent_records):
+        raise ValueError(
+            "Unused agent thinking records remain after merging trajectory analysis"
+        )
+
+    return merged_records
+
+
 def abort_on_thinking_contamination(run_dir: Path, summary: dict[str, Any]) -> None:
     analysis_path = run_dir / "thinking_analysis.jsonl"
     if not analysis_path.exists():
@@ -556,7 +747,10 @@ def abort_on_thinking_contamination(run_dir: Path, summary: dict[str, Any]) -> N
 
 
 def save_thinking_analysis(run_dir: Path, results, condition: ConditionConfig) -> None:
+    from src.agent import get_thinking_records
+
     records = build_thinking_records(results, condition)
+    records = merge_agent_thinking_records(records, get_thinking_records())
     output_path = run_dir / "thinking_analysis.jsonl"
     with output_path.open("w", encoding="utf-8") as handle:
         for record in records:
@@ -573,6 +767,7 @@ def execute_condition_run(
     port: int,
 ) -> dict[str, Any]:
     import src.register  # noqa: F401
+    from src.agent import clear_thinking_records
     from tau2.data_model.simulation import TextRunConfig  # type: ignore[import-not-found]
     from tau2.runner.batch import run_tasks  # type: ignore[import-not-found]
     from tau2.runner.helpers import get_tasks  # type: ignore[import-not-found]
@@ -604,6 +799,7 @@ def execute_condition_run(
         verbose_logs=False,
     )
 
+    clear_thinking_records()
     results = run_tasks(
         config,
         tasks,
@@ -636,6 +832,8 @@ def execute_condition_run(
 
 
 def main(args: argparse.Namespace) -> None:
+    global _shutdown_requested
+    _shutdown_requested = False
     config = load_config(Path(args.config))
     models = load_models(config, args.model)
     conditions = load_conditions(config, args.condition)
@@ -654,72 +852,116 @@ def main(args: argparse.Namespace) -> None:
             "No task selection found. Run `python scripts/select_tasks.py` first."
         )
 
-    llama_server = validate_runtime_environment()
+    previous_sigint_handler = None
+    if not args.smoke:
+        previous_sigint_handler = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, request_graceful_shutdown)
 
-    # Ensure HF cache is on persistent volume (RunPod wipes /root/.cache on restart)
-    if "HF_HOME" not in os.environ and Path("/workspace").exists():
-        os.environ["HF_HOME"] = "/workspace/hf_cache"
-        os.environ["HUGGINGFACE_HUB_CACHE"] = "/workspace/hf_cache"
+    try:
+        llama_server = validate_runtime_environment()
 
-    RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
-    all_summaries: list[dict[str, Any]] = []
-    llama_config = config["llama"]
-    port = int(llama_config["port"])
-    user_llm = user_model_name(config)
+        # Ensure HF cache is on persistent volume (RunPod wipes /root/.cache on restart)
+        if "HF_HOME" not in os.environ and Path("/workspace").exists():
+            os.environ["HF_HOME"] = "/workspace/hf_cache"
+            os.environ["HUGGINGFACE_HUB_CACHE"] = "/workspace/hf_cache"
 
-    for model in models:
-        model_timestamp = utc_timestamp()
-        log_path = RESULTS_ROOT / f"{model.short_name}_{model_timestamp}_llama.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        process = None
-        log_handle = log_path.open("w", encoding="utf-8")
-        try:
-            print(f"\nResolving GGUF path for {model.short_name}...")
-            model_path = resolve_model_path(model)
-            print(f"  -> {model_path}")
-            command = build_llama_command(model_path, llama_config, llama_server)
-            print(f"Starting llama-server for {model.short_name}: {' '.join(command)}")
-            process = subprocess.Popen(
-                command,
-                cwd=PROJECT_ROOT,
-                stdout=log_handle,
-                stderr=subprocess.STDOUT,
-                text=True,
+        RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+        if args.fresh:
+            print("Fresh run: ignoring existing results")
+            completed_conditions: set[tuple[str, str]] = set()
+        elif args.smoke:
+            completed_conditions = set()
+        else:
+            completed_conditions = set(
+                collect_completed_conditions(
+                    RESULTS_ROOT,
+                    models,
+                    conditions,
+                    task_ids,
+                    int(config["experiment"]["trials"]),
+                )
             )
-            wait_for_server(process, port)
-            print(f"llama-server ready for {model.short_name}")
+            print_resume_summary(sorted(completed_conditions))
 
-            for condition in conditions:
-                run_timestamp = utc_timestamp()
-                run_dir = (
-                    RESULTS_ROOT
-                    / f"{model.short_name}_{condition.name}_{run_timestamp}"
+        all_summaries: list[dict[str, Any]] = []
+        completed_this_session: list[str] = []
+        llama_config = config["llama"]
+        port = int(llama_config["port"])
+        user_llm = user_model_name(config)
+        resume_enabled = not args.fresh and not args.smoke
+
+        for model in models:
+            model_timestamp = utc_timestamp()
+            log_path = RESULTS_ROOT / f"{model.short_name}_{model_timestamp}_llama.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            process = None
+            log_handle = log_path.open("w", encoding="utf-8")
+            try:
+                print(f"\nResolving GGUF path for {model.short_name}...")
+                model_path = resolve_model_path(model)
+                print(f"  -> {model_path}")
+                command = build_llama_command(model_path, llama_config, llama_server)
+                print(
+                    f"Starting llama-server for {model.short_name}: {' '.join(command)}"
                 )
-                print(f"Running {model.short_name} / {condition.name} -> {run_dir}")
-                configure_condition_environment(condition, config)
-                summary = execute_condition_run(
-                    run_dir=run_dir,
-                    experiment=config["experiment"],
-                    user_llm=user_llm,
-                    model=model,
-                    condition=condition,
-                    task_ids=task_ids,
-                    port=port,
+                process = subprocess.Popen(
+                    command,
+                    cwd=PROJECT_ROOT,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    text=True,
                 )
-                all_summaries.append(summary)
+                wait_for_server(process, port)
+                print(f"llama-server ready for {model.short_name}")
 
-                # Validate: thinking_off should produce no thinking content
-                if not condition.enable_thinking:
-                    abort_on_thinking_contamination(run_dir, summary)
-        finally:
-            stop_process(process)
-            log_handle.close()
+                for condition in conditions:
+                    exit_if_shutdown_requested(completed_this_session)
+                    condition_key = (model.short_name, condition.name)
+                    if resume_enabled and condition_key in completed_conditions:
+                        print(
+                            f"Skipping completed {model.short_name} / {condition.name}"
+                        )
+                        continue
 
-    manifest = {
-        "generated_at": datetime.now(UTC).isoformat(),
-        "runs": all_summaries,
-    }
-    write_summary(RESULTS_ROOT / f"summary_{utc_timestamp()}.json", manifest)
+                    run_timestamp = utc_timestamp()
+                    run_dir = (
+                        RESULTS_ROOT
+                        / f"{model.short_name}_{condition.name}_{run_timestamp}"
+                    )
+                    print(f"Running {model.short_name} / {condition.name} -> {run_dir}")
+                    configure_condition_environment(condition, config)
+                    summary = execute_condition_run_with_cleanup(
+                        run_dir=run_dir,
+                        experiment=config["experiment"],
+                        user_llm=user_llm,
+                        model=model,
+                        condition=condition,
+                        task_ids=task_ids,
+                        port=port,
+                    )
+                    all_summaries.append(summary)
+                    completed_this_session.append(
+                        f"{model.short_name} / {condition.name}"
+                    )
+
+                    # Validate: thinking_off should produce no thinking content
+                    if not condition.enable_thinking:
+                        abort_on_thinking_contamination(run_dir, summary)
+
+                    completed_conditions.add(condition_key)
+                    exit_if_shutdown_requested(completed_this_session)
+            finally:
+                stop_process(process)
+                log_handle.close()
+
+        manifest = {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "runs": all_summaries,
+        }
+        write_summary(RESULTS_ROOT / f"summary_{utc_timestamp()}.json", manifest)
+    finally:
+        if previous_sigint_handler is not None:
+            signal.signal(signal.SIGINT, previous_sigint_handler)
 
 
 if __name__ == "__main__":

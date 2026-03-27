@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
+from dataclasses import dataclass
 from typing import Any
 
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
@@ -11,6 +12,13 @@ THINK_SUMMARY_PATTERN = re.compile(r"<think_summary>(.*?)</think_summary>", re.D
 WINDOW_PATTERN = re.compile(r"window_(\d+)")
 
 litellm = None
+
+
+@dataclass(frozen=True)
+class SummarizationResult:
+    summary: str
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 def strip_thinking(content: str) -> str:
@@ -64,7 +72,7 @@ def summarize_thinking(
     prompt_template: str,
     user_message: str = "",
     response_text: str = "",
-) -> str:
+) -> SummarizationResult:
     """Send raw thinking text to an external model for summarization.
 
     Args:
@@ -75,7 +83,7 @@ def summarize_thinking(
         response_text: Visible assistant response for the current turn.
 
     Returns:
-        Summarized text (no tags).
+        Summarized text and token usage metadata.
 
     Raises:
         Exception: If the litellm call fails (caller should handle fallback).
@@ -97,7 +105,12 @@ def summarize_thinking(
         temperature=0.3,
         max_tokens=2048,
     )
-    return response.choices[0].message.content.strip()
+    usage = getattr(response, "usage", None)
+    return SummarizationResult(
+        summary=response.choices[0].message.content.strip(),
+        input_tokens=getattr(usage, "prompt_tokens", None) if usage else None,
+        output_tokens=getattr(usage, "completion_tokens", None) if usage else None,
+    )
 
 
 def _tau2_user_message_type() -> type[Any] | None:

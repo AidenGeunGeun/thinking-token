@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import signal
+import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
+from types import ModuleType
 from unittest import mock
 
 from scripts import run_phase1
@@ -35,6 +39,9 @@ class MockResults:
 
 
 class RunPhase1Test(unittest.TestCase):
+    def setUp(self) -> None:
+        run_phase1._shutdown_requested = False
+
     def test_build_thinking_records_marks_terminal_window_state(self) -> None:
         results = MockResults(
             simulations=[
@@ -144,6 +151,167 @@ class RunPhase1Test(unittest.TestCase):
         self.assertEqual(records[0]["summary_chars"], len("condensed note"))
         self.assertIsNone(records[0]["summarizer_input_tokens"])
         self.assertIsNone(records[0]["summarizer_output_tokens"])
+
+    def test_save_thinking_analysis_merges_agent_records_by_turn(self) -> None:
+        results = MockResults(
+            simulations=[
+                MockSimulation(
+                    task_id="telecom_001",
+                    trial=0,
+                    messages=[
+                        MockMessage("user", "u1"),
+                        MockMessage("assistant", "first reply"),
+                        MockMessage("assistant", "second reply"),
+                        MockMessage("user", "u2"),
+                        MockMessage("assistant", "third reply"),
+                    ],
+                )
+            ]
+        )
+        condition = run_phase1.ConditionConfig(
+            name="summary_window3",
+            enable_thinking=True,
+            retention_strategy="window_3",
+            summarize_thinking=True,
+        )
+        agent_records = [
+            {
+                "raw_thinking_chars": 12,
+                "raw_thinking_tokens_approx": 3,
+                "summary_chars": None,
+                "summary_tokens_approx": None,
+                "summarizer_input_tokens": None,
+                "summarizer_output_tokens": None,
+                "has_tool_calls": False,
+            },
+            {
+                "raw_thinking_chars": 4,
+                "raw_thinking_tokens_approx": 1,
+                "summary_chars": 6,
+                "summary_tokens_approx": 1,
+                "summarizer_input_tokens": 100,
+                "summarizer_output_tokens": 10,
+                "has_tool_calls": False,
+            },
+            {
+                "raw_thinking_chars": 8,
+                "raw_thinking_tokens_approx": 2,
+                "summary_chars": 5,
+                "summary_tokens_approx": 1,
+                "summarizer_input_tokens": 50,
+                "summarizer_output_tokens": 7,
+                "has_tool_calls": False,
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+
+            with mock.patch(
+                "src.agent.get_thinking_records", return_value=agent_records
+            ):
+                run_phase1.save_thinking_analysis(run_dir, results, condition)
+
+            records = [
+                json.loads(line)
+                for line in (run_dir / "thinking_analysis.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["assistant_message_count"], 2)
+        self.assertEqual(records[0]["raw_thinking_chars"], 16)
+        self.assertEqual(records[0]["raw_thinking_tokens_approx"], 4)
+        self.assertEqual(records[0]["summary_chars"], 6)
+        self.assertEqual(records[0]["summary_tokens_approx"], 1)
+        self.assertEqual(records[0]["summarizer_input_tokens"], 100)
+        self.assertEqual(records[0]["summarizer_output_tokens"], 10)
+        self.assertEqual(records[1]["raw_thinking_chars"], 8)
+        self.assertEqual(records[1]["summary_chars"], 5)
+        self.assertEqual(records[1]["summarizer_input_tokens"], 50)
+        self.assertEqual(records[1]["summarizer_output_tokens"], 7)
+
+    def test_execute_condition_run_clears_thinking_records_before_run_tasks(
+        self,
+    ) -> None:
+        import importlib
+
+        agent_module = importlib.import_module("src.agent")
+        agent_module.clear_thinking_records()
+        agent_module._thinking_records.append({"stale": True})
+
+        class FakeTextRunConfig:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        def fake_get_tasks(
+            domain: str, task_split_name: str, task_ids: list[str]
+        ) -> list[str]:
+            self.assertEqual(domain, "telecom")
+            self.assertEqual(task_split_name, "phase1")
+            self.assertEqual(task_ids, ["task-1"])
+            return ["task-1"]
+
+        def fake_run_tasks(
+            config: object,
+            tasks: object,
+            save_path: object,
+            save_dir: Path,
+            console_display: object,
+        ) -> MockResults:
+            self.assertEqual(agent_module.get_thinking_records(), [])
+            self.assertIsInstance(config, FakeTextRunConfig)
+            self.assertEqual(tasks, ["task-1"])
+            self.assertEqual(save_path, save_dir / "results.json")
+            self.assertTrue(console_display)
+            return MockResults(simulations=[])
+
+        tau2_module = ModuleType("tau2")
+        tau2_data_model_module = ModuleType("tau2.data_model")
+        tau2_data_model_simulation_module = ModuleType("tau2.data_model.simulation")
+        tau2_runner_module = ModuleType("tau2.runner")
+        tau2_runner_batch_module = ModuleType("tau2.runner.batch")
+        tau2_runner_helpers_module = ModuleType("tau2.runner.helpers")
+        setattr(tau2_data_model_simulation_module, "TextRunConfig", FakeTextRunConfig)
+        setattr(tau2_runner_batch_module, "run_tasks", fake_run_tasks)
+        setattr(tau2_runner_helpers_module, "get_tasks", fake_get_tasks)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "run"
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "src.register": ModuleType("src.register"),
+                    "tau2": tau2_module,
+                    "tau2.data_model": tau2_data_model_module,
+                    "tau2.data_model.simulation": tau2_data_model_simulation_module,
+                    "tau2.runner": tau2_runner_module,
+                    "tau2.runner.batch": tau2_runner_batch_module,
+                    "tau2.runner.helpers": tau2_runner_helpers_module,
+                },
+                clear=False,
+            ):
+                with mock.patch.object(run_phase1, "save_thinking_analysis"):
+                    summary = run_phase1.execute_condition_run(
+                        run_dir=run_dir,
+                        experiment={
+                            "domain": "telecom",
+                            "task_split": "phase1",
+                            "trials": 1,
+                        },
+                        user_llm="openrouter/user-sim",
+                        model=run_phase1.ModelConfig("repo/a", "a.gguf", "model-a"),
+                        condition=run_phase1.ConditionConfig(
+                            "retain_all", True, "retain_all"
+                        ),
+                        task_ids=["task-1"],
+                        port=8080,
+                    )
+
+        self.assertEqual(summary["num_simulations"], 0)
+        self.assertEqual(summary["condition"], "retain_all")
+        self.assertEqual(agent_module.get_thinking_records(), [])
 
     def test_configure_condition_environment_sets_summarizer_env_vars(self) -> None:
         config = {
@@ -338,6 +506,288 @@ class RunPhase1Test(unittest.TestCase):
             with redirect_stdout(StringIO()):
                 with self.assertRaisesRegex(RuntimeError, "contamination detected"):
                     run_phase1.abort_on_thinking_contamination(run_dir, summary)
+
+    def test_main_skips_completed_conditions_and_runs_missing(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        conditions = [
+            run_phase1.ConditionConfig("completed", False, "strip_all"),
+            run_phase1.ConditionConfig("missing", True, "retain_all"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            completed_dir = results_root / "model-a_completed_20260101T000000Z"
+            completed_dir.mkdir(parents=True)
+            (completed_dir / "summary.json").write_text(
+                json.dumps({"task_ids": ["task-1"], "num_simulations": 1}),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with self._patch_main_dependencies(
+                    results_root=results_root,
+                    models=[model],
+                    conditions=conditions,
+                    execute_condition_run=mock.Mock(
+                        return_value={"model": model.short_name, "condition": "missing"}
+                    ),
+                ) as execute_condition_run:
+                    run_phase1.main(self._main_args())
+
+            execute_condition_run.assert_called_once()
+            self.assertEqual(
+                execute_condition_run.call_args.kwargs["condition"].name, "missing"
+            )
+            output = stdout.getvalue()
+            self.assertIn("Resuming: skipping 1 completed conditions", output)
+            self.assertIn("- model-a / completed", output)
+            self.assertIn("Skipping completed model-a / completed", output)
+
+    def test_main_fresh_ignores_completed_conditions(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        condition = run_phase1.ConditionConfig("completed", False, "strip_all")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            completed_dir = results_root / "model-a_completed_20260101T000000Z"
+            completed_dir.mkdir(parents=True)
+            (completed_dir / "summary.json").write_text(
+                json.dumps({"task_ids": ["task-1"], "num_simulations": 1}),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with self._patch_main_dependencies(
+                    results_root=results_root,
+                    models=[model],
+                    conditions=[condition],
+                    execute_condition_run=mock.Mock(
+                        return_value={
+                            "model": model.short_name,
+                            "condition": condition.name,
+                        }
+                    ),
+                ) as execute_condition_run:
+                    run_phase1.main(self._main_args(fresh=True))
+
+            execute_condition_run.assert_called_once()
+            output = stdout.getvalue()
+            self.assertIn("Fresh run: ignoring existing results", output)
+            self.assertNotIn("Skipping completed", output)
+
+    def test_main_does_not_skip_mismatched_subset_runs(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        condition = run_phase1.ConditionConfig("completed", False, "strip_all")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            subset_dir = results_root / "model-a_completed_20260101T000000Z"
+            subset_dir.mkdir(parents=True)
+            (subset_dir / "summary.json").write_text(
+                json.dumps({"task_ids": ["task-smoke"], "num_simulations": 1}),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with self._patch_main_dependencies(
+                    results_root=results_root,
+                    models=[model],
+                    conditions=[condition],
+                    execute_condition_run=mock.Mock(
+                        return_value={
+                            "model": model.short_name,
+                            "condition": condition.name,
+                        }
+                    ),
+                ) as execute_condition_run:
+                    run_phase1.main(self._main_args())
+
+            execute_condition_run.assert_called_once()
+            self.assertIn(
+                "Starting fresh: 0 completed conditions found",
+                stdout.getvalue(),
+            )
+
+    def test_main_does_not_skip_contaminated_runs(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        condition = run_phase1.ConditionConfig("thinking_off", False, "strip_all")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            contaminated_dir = results_root / "model-a_thinking_off_20260101T000000Z"
+            contaminated_dir.mkdir(parents=True)
+            (contaminated_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "task_ids": ["task-1"],
+                        "num_simulations": 1,
+                        "contaminated": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with self._patch_main_dependencies(
+                    results_root=results_root,
+                    models=[model],
+                    conditions=[condition],
+                    execute_condition_run=mock.Mock(
+                        return_value={
+                            "model": model.short_name,
+                            "condition": condition.name,
+                        }
+                    ),
+                ) as execute_condition_run:
+                    run_phase1.main(self._main_args())
+
+            execute_condition_run.assert_called_once()
+            self.assertIn(
+                "Starting fresh: 0 completed conditions found",
+                stdout.getvalue(),
+            )
+
+    def test_execute_condition_run_with_cleanup_removes_partial_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "model-a_condition-a_20260101T000000Z"
+
+            def fail_run(**_: object) -> dict[str, object]:
+                run_dir.mkdir(parents=True, exist_ok=True)
+                (run_dir / "results.json").write_text("{}", encoding="utf-8")
+                raise RuntimeError("boom")
+
+            stdout = StringIO()
+            with mock.patch.object(
+                run_phase1,
+                "execute_condition_run",
+                side_effect=fail_run,
+            ):
+                with redirect_stdout(stdout):
+                    with self.assertRaisesRegex(RuntimeError, "boom"):
+                        run_phase1.execute_condition_run_with_cleanup(
+                            run_dir=run_dir,
+                            experiment={},
+                            user_llm="user/model",
+                            model=run_phase1.ModelConfig("repo/a", "a.gguf", "model-a"),
+                            condition=run_phase1.ConditionConfig(
+                                "condition-a", True, "retain_all"
+                            ),
+                            task_ids=["task-1"],
+                            port=8080,
+                        )
+
+            self.assertFalse(run_dir.exists())
+            self.assertIn(
+                f"Cleaned up partial run: {run_dir.name}",
+                stdout.getvalue(),
+            )
+
+    def test_exit_if_shutdown_requested_exits_cleanly_between_conditions(self) -> None:
+        run_phase1._shutdown_requested = True
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            with self.assertRaises(SystemExit) as excinfo:
+                run_phase1.exit_if_shutdown_requested(["model-a / condition-a"])
+
+        self.assertEqual(excinfo.exception.code, 0)
+        self.assertIn(
+            "Graceful shutdown complete. Completed this session:", stdout.getvalue()
+        )
+        self.assertIn("- model-a / condition-a", stdout.getvalue())
+
+    def test_request_graceful_shutdown_second_signal_forces_keyboard_interrupt(
+        self,
+    ) -> None:
+        stdout = StringIO()
+        default_handler = mock.Mock(side_effect=KeyboardInterrupt)
+
+        with mock.patch.object(run_phase1.signal, "signal") as signal_mock:
+            with mock.patch.object(
+                run_phase1.signal,
+                "default_int_handler",
+                default_handler,
+            ):
+                with redirect_stdout(stdout):
+                    run_phase1.request_graceful_shutdown(signal.SIGINT, None)
+                    with self.assertRaises(KeyboardInterrupt):
+                        run_phase1.request_graceful_shutdown(signal.SIGINT, None)
+
+        self.assertTrue(run_phase1._shutdown_requested)
+        signal_mock.assert_called_with(signal.SIGINT, default_handler)
+        default_handler.assert_called_once_with(signal.SIGINT, None)
+        self.assertIn("Graceful shutdown requested.", stdout.getvalue())
+
+    @staticmethod
+    def _main_args(**overrides: object) -> argparse.Namespace:
+        values = {
+            "config": "unused.json",
+            "model": [],
+            "condition": [],
+            "dry_run": False,
+            "smoke": False,
+            "fresh": False,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    @contextmanager
+    def _patch_main_dependencies(
+        self,
+        *,
+        results_root: Path,
+        models: list[run_phase1.ModelConfig],
+        conditions: list[run_phase1.ConditionConfig],
+        execute_condition_run: mock.Mock,
+    ):
+        config = {
+            "experiment": {
+                "benchmark": "bench",
+                "domain": "telecom",
+                "task_split": "test",
+                "trials": 1,
+            },
+            "llama": {"port": 8080},
+            "user_sim": {"provider": "openrouter", "model": "mimo"},
+        }
+        process = mock.Mock()
+        process.poll.return_value = None
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.multiple(
+                    run_phase1,
+                    RESULTS_ROOT=results_root,
+                    load_config=mock.Mock(return_value=config),
+                    load_models=mock.Mock(return_value=models),
+                    load_conditions=mock.Mock(return_value=conditions),
+                    load_task_ids=mock.Mock(return_value=["task-1"]),
+                    print_plan=mock.Mock(),
+                    validate_runtime_environment=mock.Mock(
+                        return_value="/tmp/llama-server"
+                    ),
+                    resolve_model_path=mock.Mock(return_value="/tmp/model.gguf"),
+                    build_llama_command=mock.Mock(return_value=["llama-server"]),
+                    wait_for_server=mock.Mock(),
+                    stop_process=mock.Mock(),
+                    configure_condition_environment=mock.Mock(),
+                    execute_condition_run=execute_condition_run,
+                )
+            )
+            stack.enter_context(
+                mock.patch("scripts.run_phase1.subprocess.Popen", return_value=process)
+            )
+            stack.enter_context(
+                mock.patch(
+                    "scripts.run_phase1.signal.getsignal",
+                    return_value=signal.default_int_handler,
+                )
+            )
+            stack.enter_context(mock.patch("scripts.run_phase1.signal.signal"))
+            yield execute_condition_run
 
 
 if __name__ == "__main__":

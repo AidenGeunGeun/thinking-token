@@ -84,14 +84,18 @@ These fields track the real compute cost per LLM call, which varies by retention
 
 The analysis file is intentionally narrow: it complements tau2-bench trajectories instead of replacing them.
 
-## Known Issues
+## Checkpoint / Resume
 
-### thinking_analysis.jsonl records all zeros (Phase 1)
+`run_phase1.py` supports checkpoint/resume. A condition run is "complete" when its `summary.json` exists with matching `task_ids` and `num_simulations`. On restart, completed conditions are skipped automatically. Use `--fresh` to ignore existing results and re-run everything.
 
-In the current codebase, `build_thinking_records()` in `run_phase1.py` reads from the messages stored in `results.json` — which is the **public view** (all thinking already stripped by `_strip_thinking_for_history()`). As a result, `raw_thinking_chars`, `raw_thinking_tokens_approx`, `summary_chars`, and `summary_tokens_approx` are all zero across every condition.
+Partial run directories (interrupted mid-condition, no `summary.json`) are cleaned up automatically. First Ctrl+C requests graceful shutdown after the current condition; second Ctrl+C force-quits.
 
-The agent's internal state (`_internal_messages`) where thinking/summaries are preserved is not captured in any output file. To fix this, the agent would need to log its internal state separately before stripping, or `build_thinking_records()` would need access to the pre-stripped messages.
+## Data Source
 
-### No agent-view data in results
+Thinking metrics in `thinking_analysis.jsonl` come from the **agent-side accumulator** (`src/agent._thinking_records`), not from `results.json`. The agent captures raw thinking chars, summary chars, and summarizer token usage from litellm *before* stripping thinking for the public view. The runner merges these agent records with trajectory turn structure after each condition run.
 
-`results.json` contains only the user-sim-visible view (clean text). Raw `<think>` blocks and `<think_summary>` blocks generated during inference are not preserved in any output file. Conversation analysis must rely on behavioral patterns observable in the public view (tool call sequences, agent responses, termination reasons).
+`results.json` still contains only the user-sim-visible view (clean text). The agent accumulator is the authoritative source for thinking token counts.
+
+### Known Issues (Phase 1 historical data)
+
+Phase 1 data collected before the accumulator fix has all-zero thinking metrics. This affects runs in `results/phase1/` from the 2B and 9B experiments. The fix is forward-only — re-running produces correct data.

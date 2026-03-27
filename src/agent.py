@@ -51,14 +51,58 @@ except ImportError as exc:  # pragma: no cover - exercised only without tau2 ins
 
 from .thinking import (
     apply_retention_strategy,
+    count_thinking_tokens_approx,
     extract_thinking,
     replace_thinking_with_summary,
     strip_think_summary,
     strip_all_thinking_tags,
+    SummarizationResult,
     summarize_thinking,
 )
 
 logger = logging.getLogger(__name__)
+_thinking_records: list[dict[str, Any]] = []
+
+
+def get_thinking_records() -> list[dict[str, Any]]:
+    return list(_thinking_records)
+
+
+def clear_thinking_records() -> None:
+    _thinking_records.clear()
+
+
+def _build_thinking_record(assistant_message: Any) -> dict[str, Any]:
+    has_tool_calls = _has_tool_calls(assistant_message)
+    thinking_text = ""
+    if not has_tool_calls:
+        content = getattr(assistant_message, "content", None)
+        if isinstance(content, str):
+            thinking_text, _ = extract_thinking(content)
+
+    raw_thinking_chars = len(thinking_text)
+    return {
+        "raw_thinking_chars": raw_thinking_chars,
+        "raw_thinking_tokens_approx": count_thinking_tokens_approx(thinking_text),
+        "summary_chars": None,
+        "summary_tokens_approx": None,
+        "summarizer_input_tokens": None,
+        "summarizer_output_tokens": None,
+        "has_tool_calls": has_tool_calls,
+    }
+
+
+def _apply_summarization_record(
+    record: dict[str, Any], result: SummarizationResult | None
+) -> dict[str, Any]:
+    if result is None:
+        return record
+
+    record["summary_chars"] = len(result.summary)
+    record["summary_tokens_approx"] = count_thinking_tokens_approx(result.summary)
+    record["summarizer_input_tokens"] = result.input_tokens
+    record["summarizer_output_tokens"] = result.output_tokens
+    return record
 
 
 def _coerce_reasoning_text(value: Any) -> str | None:
@@ -254,6 +298,7 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
         self._debug_assistant_turns: list[dict[str, Any]] = []
         self._internal_state: Any | None = None
         self._internal_messages: list[Any] = []
+        self._latest_summarization_result: SummarizationResult | None = None
 
     def _sync_internal_messages(self, state: Any) -> None:
         state_messages = getattr(state, "messages", [])
@@ -285,6 +330,8 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
 
     def _maybe_summarize_thinking(self, assistant_message: Any) -> Any:
         """Replace raw <think> blocks with <think_summary> if enabled."""
+        self._latest_summarization_result = None
+
         if not self.summarize_thinking:
             return assistant_message
 
@@ -303,14 +350,18 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
         response_text = strip_all_thinking_tags(content)
 
         try:
-            summary = summarize_thinking(
+            result = summarize_thinking(
                 thinking_text,
                 self.summarizer_model,
                 self.summarizer_prompt,
                 user_message=user_message,
                 response_text=response_text,
             )
-            assistant_message.content = replace_thinking_with_summary(content, summary)
+            assistant_message.content = replace_thinking_with_summary(
+                content, result.summary
+            )
+            self._latest_summarization_result = result
+            return assistant_message
         except Exception:
             logger.warning(
                 "Summarizer failed; stripping thinking from this message",
@@ -392,7 +443,13 @@ class ThinkingRetentionAgent(LLMAgent):  # type: ignore[misc]
             **self.llm_args,
         )
         assistant_message = _restore_thinking_blocks(assistant_message)
+        thinking_record = _build_thinking_record(assistant_message)
         assistant_message = self._maybe_summarize_thinking(assistant_message)
+        _thinking_records.append(
+            _apply_summarization_record(
+                thinking_record, self._latest_summarization_result
+            )
+        )
         if self._debug_snapshot_path:
             content = getattr(assistant_message, "content", "") or ""
             reasoning = _extract_reasoning(getattr(assistant_message, "raw_data", None))
