@@ -11,6 +11,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -371,7 +372,51 @@ def print_plan(
 
 def write_summary(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _read_json_file(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _results_metadata(results_path: Path) -> tuple[int, bool] | None:
+    payload = _read_json_file(results_path)
+    if payload is None:
+        return None
+    simulations = payload.get("simulations")
+    if not isinstance(simulations, list):
+        return None
+    has_meaningful_simulation = False
+    for simulation in simulations:
+        if not isinstance(simulation, dict):
+            continue
+        messages = simulation.get("messages")
+        if isinstance(messages, list) and len(messages) > 5:
+            has_meaningful_simulation = True
+            break
+    return len(simulations), has_meaningful_simulation
 
 
 def apply_smoke_selection(
@@ -415,21 +460,26 @@ def completed_condition_runs(
     pattern = f"{model_short_name}_{condition_name}_*/summary.json"
     matches: list[Path] = []
     for summary_path in sorted(results_root.glob(pattern)):
-        if task_ids is None and trials is None:
-            matches.append(summary_path)
+        payload = _read_json_file(summary_path)
+        if payload is None:
             continue
-        try:
-            payload = json.loads(summary_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        if payload.get("status") not in (None, "complete"):
             continue
         if payload.get("contaminated"):
             continue
+        results_path = summary_path.parent / "results.json"
+        results_metadata = _results_metadata(results_path)
+        if results_metadata is None:
+            continue
+        results_count, has_meaningful_results = results_metadata
+        if not has_meaningful_results:
+            continue
+        if task_ids is None and trials is None:
+            matches.append(summary_path)
+            continue
         if task_ids is not None and payload.get("task_ids") != task_ids:
             continue
-        if (
-            trials is not None
-            and payload.get("num_simulations") != len(task_ids or []) * trials
-        ):
+        if trials is not None and results_count != len(task_ids or []) * trials:
             continue
         matches.append(summary_path)
     return matches
@@ -465,9 +515,20 @@ def print_resume_summary(completed: list[tuple[str, str]]) -> None:
         print(f"- {model_short_name} / {condition_name}")
 
 
-def cleanup_partial_run(run_dir: Path) -> None:
+def cleanup_partial_run(run_dir: Path, exc: BaseException | None = None) -> None:
     summary_path = run_dir / "summary.json"
-    if not run_dir.exists() or summary_path.exists():
+    results_path = run_dir / "results.json"
+    if not run_dir.exists():
+        return
+    if results_path.exists():
+        payload = _read_json_file(summary_path) or {}
+        payload["status"] = "failed"
+        payload["error"] = (
+            str(exc) if exc is not None else "Run failed before completion"
+        )
+        payload["generated_at"] = datetime.now(UTC).isoformat()
+        write_summary(summary_path, payload)
+        print(f"Preserved failed run: {run_dir.name}")
         return
     shutil.rmtree(run_dir)
     print(f"Cleaned up partial run: {run_dir.name}")
@@ -492,8 +553,8 @@ def execute_condition_run_with_cleanup(
             task_ids=task_ids,
             port=port,
         )
-    except BaseException:
-        cleanup_partial_run(run_dir)
+    except BaseException as exc:
+        cleanup_partial_run(run_dir, exc)
         raise
 
 
@@ -785,6 +846,18 @@ def execute_condition_run(
         task_ids=task_ids,
     )
     run_dir.mkdir(parents=True, exist_ok=True)
+    initial_summary = {
+        "model": model.short_name,
+        "model_hf_repo": model.hf_repo,
+        "model_hf_file": model.hf_file,
+        "condition": condition.name,
+        "enable_thinking": condition.enable_thinking,
+        "retention_strategy": condition.retention_strategy,
+        "task_ids": task_ids,
+        "status": "running",
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
+    write_summary(run_dir / "summary.json", initial_summary)
     config = TextRunConfig(
         domain=experiment["domain"],
         task_set_name=experiment["domain"],
@@ -817,13 +890,9 @@ def execute_condition_run(
         if simulation.reward_info is not None and simulation.reward_info.reward >= 1.0
     )
     summary = {
-        "model": model.short_name,
-        "model_hf_repo": model.hf_repo,
-        "model_hf_file": model.hf_file,
-        "condition": condition.name,
-        "enable_thinking": condition.enable_thinking,
-        "retention_strategy": condition.retention_strategy,
+        **initial_summary,
         "task_ids": task_ids,
+        "status": "complete",
         "num_simulations": len(results.simulations),
         "full_reward_count": passed,
         "contaminated": False,

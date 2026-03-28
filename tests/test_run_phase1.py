@@ -263,8 +263,15 @@ class RunPhase1Test(unittest.TestCase):
             self.assertEqual(agent_module.get_thinking_records(), [])
             self.assertIsInstance(config, FakeTextRunConfig)
             self.assertEqual(tasks, ["task-1"])
-            self.assertEqual(save_path, save_dir / "results.json")
+            results_path = save_dir / "results.json"
+            self.assertEqual(save_path, results_path)
             self.assertTrue(console_display)
+            summary = json.loads(
+                (save_dir / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(summary["status"], "running")
+            self.assertEqual(summary["task_ids"], ["task-1"])
+            results_path.write_text(json.dumps({"simulations": []}), encoding="utf-8")
             return MockResults(simulations=[])
 
         tau2_module = ModuleType("tau2")
@@ -308,10 +315,15 @@ class RunPhase1Test(unittest.TestCase):
                         task_ids=["task-1"],
                         port=8080,
                     )
+                written_summary = json.loads(
+                    (run_dir / "summary.json").read_text(encoding="utf-8")
+                )
 
         self.assertEqual(summary["num_simulations"], 0)
         self.assertEqual(summary["condition"], "retain_all")
+        self.assertEqual(summary["status"], "complete")
         self.assertEqual(agent_module.get_thinking_records(), [])
+        self.assertEqual(written_summary["status"], "complete")
 
     def test_configure_condition_environment_sets_summarizer_env_vars(self) -> None:
         config = {
@@ -517,10 +529,9 @@ class RunPhase1Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             results_root = Path(tmpdir)
             completed_dir = results_root / "model-a_completed_20260101T000000Z"
-            completed_dir.mkdir(parents=True)
-            (completed_dir / "summary.json").write_text(
-                json.dumps({"task_ids": ["task-1"], "num_simulations": 1}),
-                encoding="utf-8",
+            self._write_run_fixture(
+                completed_dir,
+                {"task_ids": ["task-1"], "num_simulations": 1, "status": "complete"},
             )
 
             stdout = StringIO()
@@ -551,10 +562,9 @@ class RunPhase1Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             results_root = Path(tmpdir)
             completed_dir = results_root / "model-a_completed_20260101T000000Z"
-            completed_dir.mkdir(parents=True)
-            (completed_dir / "summary.json").write_text(
-                json.dumps({"task_ids": ["task-1"], "num_simulations": 1}),
-                encoding="utf-8",
+            self._write_run_fixture(
+                completed_dir,
+                {"task_ids": ["task-1"], "num_simulations": 1, "status": "complete"},
             )
 
             stdout = StringIO()
@@ -584,10 +594,13 @@ class RunPhase1Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             results_root = Path(tmpdir)
             subset_dir = results_root / "model-a_completed_20260101T000000Z"
-            subset_dir.mkdir(parents=True)
-            (subset_dir / "summary.json").write_text(
-                json.dumps({"task_ids": ["task-smoke"], "num_simulations": 1}),
-                encoding="utf-8",
+            self._write_run_fixture(
+                subset_dir,
+                {
+                    "task_ids": ["task-smoke"],
+                    "num_simulations": 1,
+                    "status": "complete",
+                },
             )
 
             stdout = StringIO()
@@ -618,16 +631,14 @@ class RunPhase1Test(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             results_root = Path(tmpdir)
             contaminated_dir = results_root / "model-a_thinking_off_20260101T000000Z"
-            contaminated_dir.mkdir(parents=True)
-            (contaminated_dir / "summary.json").write_text(
-                json.dumps(
-                    {
-                        "task_ids": ["task-1"],
-                        "num_simulations": 1,
-                        "contaminated": True,
-                    }
-                ),
-                encoding="utf-8",
+            self._write_run_fixture(
+                contaminated_dir,
+                {
+                    "task_ids": ["task-1"],
+                    "num_simulations": 1,
+                    "status": "complete",
+                    "contaminated": True,
+                },
             )
 
             stdout = StringIO()
@@ -651,7 +662,144 @@ class RunPhase1Test(unittest.TestCase):
                 stdout.getvalue(),
             )
 
-    def test_execute_condition_run_with_cleanup_removes_partial_directory(self) -> None:
+    def test_main_does_not_skip_running_runs(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        condition = run_phase1.ConditionConfig("running", True, "retain_all")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            running_dir = results_root / "model-a_running_20260101T000000Z"
+            self._write_run_fixture(
+                running_dir,
+                {"task_ids": ["task-1"], "num_simulations": 1, "status": "running"},
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with self._patch_main_dependencies(
+                    results_root=results_root,
+                    models=[model],
+                    conditions=[condition],
+                    execute_condition_run=mock.Mock(
+                        return_value={
+                            "model": model.short_name,
+                            "condition": condition.name,
+                        }
+                    ),
+                ) as execute_condition_run:
+                    run_phase1.main(self._main_args())
+
+            execute_condition_run.assert_called_once()
+            self.assertIn(
+                "Starting fresh: 0 completed conditions found",
+                stdout.getvalue(),
+            )
+
+    def test_main_does_not_skip_failed_runs(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        condition = run_phase1.ConditionConfig("failed", True, "retain_all")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            failed_dir = results_root / "model-a_failed_20260101T000000Z"
+            self._write_run_fixture(
+                failed_dir,
+                {"task_ids": ["task-1"], "num_simulations": 1, "status": "failed"},
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with self._patch_main_dependencies(
+                    results_root=results_root,
+                    models=[model],
+                    conditions=[condition],
+                    execute_condition_run=mock.Mock(
+                        return_value={
+                            "model": model.short_name,
+                            "condition": condition.name,
+                        }
+                    ),
+                ) as execute_condition_run:
+                    run_phase1.main(self._main_args())
+
+            execute_condition_run.assert_called_once()
+            self.assertIn(
+                "Starting fresh: 0 completed conditions found",
+                stdout.getvalue(),
+            )
+
+    def test_main_skips_legacy_completed_runs_with_valid_results(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        conditions = [
+            run_phase1.ConditionConfig("completed", False, "strip_all"),
+            run_phase1.ConditionConfig("missing", True, "retain_all"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            completed_dir = results_root / "model-a_completed_20260101T000000Z"
+            self._write_run_fixture(
+                completed_dir,
+                {"task_ids": ["task-1"], "num_simulations": 1},
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with self._patch_main_dependencies(
+                    results_root=results_root,
+                    models=[model],
+                    conditions=conditions,
+                    execute_condition_run=mock.Mock(
+                        return_value={"model": model.short_name, "condition": "missing"}
+                    ),
+                ) as execute_condition_run:
+                    run_phase1.main(self._main_args())
+
+            execute_condition_run.assert_called_once()
+            self.assertEqual(
+                execute_condition_run.call_args.kwargs["condition"].name, "missing"
+            )
+            self.assertIn(
+                "Resuming: skipping 1 completed conditions", stdout.getvalue()
+            )
+
+    def test_main_does_not_skip_runs_with_only_short_conversations(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        condition = run_phase1.ConditionConfig("completed", False, "strip_all")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            run_dir = results_root / "model-a_completed_20260101T000000Z"
+            self._write_run_fixture(
+                run_dir,
+                {"task_ids": ["task-1"], "num_simulations": 1, "status": "complete"},
+                message_counts=[5],
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                with self._patch_main_dependencies(
+                    results_root=results_root,
+                    models=[model],
+                    conditions=[condition],
+                    execute_condition_run=mock.Mock(
+                        return_value={
+                            "model": model.short_name,
+                            "condition": condition.name,
+                        }
+                    ),
+                ) as execute_condition_run:
+                    run_phase1.main(self._main_args())
+
+            execute_condition_run.assert_called_once()
+            self.assertIn(
+                "Starting fresh: 0 completed conditions found",
+                stdout.getvalue(),
+            )
+
+    def test_execute_condition_run_with_cleanup_preserves_results_and_marks_failed(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir) / "model-a_condition-a_20260101T000000Z"
 
@@ -679,6 +827,41 @@ class RunPhase1Test(unittest.TestCase):
                             task_ids=["task-1"],
                             port=8080,
                         )
+
+            self.assertTrue(run_dir.exists())
+            written_summary = json.loads(
+                (run_dir / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(written_summary["status"], "failed")
+            self.assertEqual(written_summary["error"], "boom")
+            self.assertIn(f"Preserved failed run: {run_dir.name}", stdout.getvalue())
+
+    def test_cleanup_partial_run_deletes_directory_without_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "model-a_condition-a_20260101T000000Z"
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                run_phase1.cleanup_partial_run(run_dir, RuntimeError("boom"))
+
+            self.assertFalse(run_dir.exists())
+            self.assertIn(
+                f"Cleaned up partial run: {run_dir.name}",
+                stdout.getvalue(),
+            )
+
+    def test_cleanup_partial_run_deletes_summary_only_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "model-a_condition-a_20260101T000000Z"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "summary.json").write_text(
+                json.dumps({"status": "complete"}), encoding="utf-8"
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                run_phase1.cleanup_partial_run(run_dir, RuntimeError("boom"))
 
             self.assertFalse(run_dir.exists())
             self.assertIn(
@@ -734,6 +917,40 @@ class RunPhase1Test(unittest.TestCase):
         }
         values.update(overrides)
         return argparse.Namespace(**values)
+
+    @staticmethod
+    def _write_run_fixture(
+        run_dir: Path,
+        summary: dict[str, object],
+        *,
+        message_counts: list[int] | None = None,
+    ) -> None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        RunPhase1Test._write_results_fixture(
+            run_dir,
+            message_counts if message_counts is not None else [6],
+        )
+
+    @staticmethod
+    def _write_results_fixture(run_dir: Path, message_counts: list[int]) -> None:
+        simulations = []
+        for index, count in enumerate(message_counts):
+            simulations.append(
+                {
+                    "task_id": f"task-{index}",
+                    "messages": [
+                        {
+                            "role": "assistant" if message_index % 2 else "user",
+                            "content": f"message-{index}-{message_index}",
+                        }
+                        for message_index in range(count)
+                    ],
+                }
+            )
+        (run_dir / "results.json").write_text(
+            json.dumps({"simulations": simulations}), encoding="utf-8"
+        )
 
     @contextmanager
     def _patch_main_dependencies(
