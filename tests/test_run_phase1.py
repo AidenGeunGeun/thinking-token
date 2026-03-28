@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
 from types import ModuleType
+from typing import cast
 from unittest import mock
 
 from scripts import run_phase1
@@ -232,6 +233,50 @@ class RunPhase1Test(unittest.TestCase):
         self.assertEqual(records[1]["summarizer_input_tokens"], 50)
         self.assertEqual(records[1]["summarizer_output_tokens"], 7)
 
+    def test_merge_agent_thinking_records_reports_overflow_diagnostics(self) -> None:
+        records = [
+            {
+                "task_id": "task-1",
+                "trial": 0,
+                "assistant_message_count": 1,
+                "raw_thinking_chars": 0,
+                "raw_thinking_tokens_approx": 0,
+                "summary_chars": None,
+                "summary_tokens_approx": None,
+                "summarizer_input_tokens": None,
+                "summarizer_output_tokens": None,
+            }
+        ]
+        agent_records = [
+            {
+                "raw_thinking_chars": 10,
+                "raw_thinking_tokens_approx": 2,
+                "summary_chars": None,
+                "summary_tokens_approx": None,
+                "summarizer_input_tokens": None,
+                "summarizer_output_tokens": None,
+            },
+            {
+                "raw_thinking_chars": 4,
+                "raw_thinking_tokens_approx": 1,
+                "summary_chars": None,
+                "summary_tokens_approx": None,
+                "summarizer_input_tokens": None,
+                "summarizer_output_tokens": None,
+            },
+        ]
+
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            merged = run_phase1.merge_agent_thinking_records(records, agent_records)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["raw_thinking_chars"], 10)
+        self.assertIn("overflow agent thinking records", stdout.getvalue())
+        self.assertIn("1 task/trial runs", stdout.getvalue())
+        self.assertIn("expected 1 assistant-message records", stdout.getvalue())
+        self.assertIn("got 2", stdout.getvalue())
+
     def test_execute_condition_run_clears_thinking_records_before_run_tasks(
         self,
     ) -> None:
@@ -262,6 +307,11 @@ class RunPhase1Test(unittest.TestCase):
         ) -> MockResults:
             self.assertEqual(agent_module.get_thinking_records(), [])
             self.assertIsInstance(config, FakeTextRunConfig)
+            run_config = cast(FakeTextRunConfig, config)
+            llm_args_agent = cast(
+                dict[str, object], run_config.kwargs["llm_args_agent"]
+            )
+            self.assertEqual(llm_args_agent["max_tokens"], 1234)
             self.assertEqual(tasks, ["task-1"])
             results_path = save_dir / "results.json"
             self.assertEqual(save_path, results_path)
@@ -302,6 +352,7 @@ class RunPhase1Test(unittest.TestCase):
                 with mock.patch.object(run_phase1, "save_thinking_analysis"):
                     summary = run_phase1.execute_condition_run(
                         run_dir=run_dir,
+                        config={"generation": {"max_tokens": 1234}},
                         experiment={
                             "domain": "telecom",
                             "task_split": "phase1",
@@ -382,6 +433,25 @@ class RunPhase1Test(unittest.TestCase):
             self.assertEqual(os.environ["SUMMARIZE_THINKING"], "false")
             self.assertNotIn("SUMMARIZER_MODEL", os.environ)
             self.assertNotIn("SUMMARIZER_PROMPT", os.environ)
+
+    def test_phase2_config_loads_expected_paths_tasks_and_conditions(self) -> None:
+        config = run_phase1.load_config(
+            run_phase1.PROJECT_ROOT / "configs" / "phase2.yaml"
+        )
+
+        self.assertEqual(
+            run_phase1.resolve_tasks_path(config),
+            run_phase1.PROJECT_ROOT / "configs" / "phase2_tasks.json",
+        )
+        self.assertEqual(
+            run_phase1.resolve_results_root(config),
+            run_phase1.PROJECT_ROOT / "results" / "phase2",
+        )
+        self.assertEqual(len(run_phase1.load_task_ids(config)), 114)
+        self.assertEqual(
+            [condition.name for condition in run_phase1.load_conditions(config, [])],
+            ["strip_all", "raw_window3", "raw_retain"],
+        )
 
     def test_condition_config_summarize_thinking_field(self) -> None:
         condition = run_phase1.ConditionConfig(
@@ -818,6 +888,7 @@ class RunPhase1Test(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "boom"):
                         run_phase1.execute_condition_run_with_cleanup(
                             run_dir=run_dir,
+                            config={},
                             experiment={},
                             user_llm="user/model",
                             model=run_phase1.ModelConfig("repo/a", "a.gguf", "model-a"),

@@ -1,36 +1,72 @@
 #!/usr/bin/env python3
-"""View Phase 1 results as a clean table. Run anytime, even mid-experiment."""
+"""View benchmark results as a clean table. Run anytime, even mid-experiment."""
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
-RESULTS_ROOT = Path(__file__).resolve().parents[1] / "results" / "phase1"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-MODEL_ORDER = ["qwen35-0.8b", "qwen35-4b", "qwen35-9b"]
-CONDITION_ORDER = ["thinking_off", "strip_all", "window_3", "retain_all"]
+from scripts.run_phase1 import (  # noqa: E402
+    CONFIG_PATH,
+    load_conditions,
+    load_config,
+    load_models,
+    resolve_results_root,
+)
 
 
-def load_run_data(run_dir: Path) -> dict | None:
-    """Load summary + detailed simulation data from a run directory."""
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config", default=str(CONFIG_PATH), help="path to experiment config"
+    )
+    parser.add_argument(
+        "--detail", "-d", action="store_true", help="show per-task breakdown"
+    )
+    return parser.parse_args(argv)
+
+
+def load_run_summary(run_dir: Path) -> dict[str, Any] | None:
     summary_path = run_dir / "summary.json"
-    results_path = run_dir / "results.json"
     if not summary_path.exists():
         return None
     try:
-        summary = json.loads(summary_path.read_text())
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        if not isinstance(summary, dict):
+            return None
         summary["_dir"] = run_dir.name
+        return summary
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def is_completed_summary(summary: dict[str, Any]) -> bool:
+    return summary.get("status") in (None, "complete")
+
+
+def load_run_data(
+    run_dir: Path, summary: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
+    """Load summary + detailed simulation data from a completed run directory."""
+    results_path = run_dir / "results.json"
+    try:
+        summary = summary or load_run_summary(run_dir)
+        if summary is None or not is_completed_summary(summary):
+            return None
 
         if results_path.exists():
-            results = json.loads(results_path.read_text())
+            results = json.loads(results_path.read_text(encoding="utf-8"))
             sims = results.get("simulations", [])
             tasks = []
             total_duration = 0.0
             total_messages = 0
-            total_partial_reward = 0.0
-            total_partial_possible = 0
             term_counts: dict[str, int] = {}
 
             for sim in sims:
@@ -50,11 +86,10 @@ def load_run_data(run_dir: Path) -> dict | None:
                 duration = sim.get("duration", 0)
                 msgs = len(sim.get("messages", []))
 
-                # Extract partial action rewards
                 action_reward = 0
                 action_total = 0
                 if isinstance(reward_info, dict):
-                    for key, val in reward_info.items():
+                    for val in reward_info.values():
                         if isinstance(val, dict) and "checks" in val:
                             for check in val["checks"]:
                                 if isinstance(check, dict) and "reward" in check:
@@ -87,31 +122,55 @@ def load_run_data(run_dir: Path) -> dict | None:
         return None
 
 
-def print_summary_table(runs: list[dict]) -> None:
-    grid: dict[tuple[str, str], dict] = {}
-    for r in runs:
-        key = (r.get("model", "?"), r.get("condition", "?"))
-        grid[key] = r
+def build_run_grid(runs: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    grid: dict[tuple[str, str], dict[str, Any]] = {}
+    for run in runs:
+        key = (run.get("model", "?"), run.get("condition", "?"))
+        grid[key] = run
+    return grid
 
+
+def matches_config_run(
+    run_dir: Path,
+    summary: dict[str, Any] | None,
+    allowed_pairs: set[tuple[str, str]],
+) -> bool:
+    if summary is not None:
+        return (
+            summary.get("model", "?"),
+            summary.get("condition", "?"),
+        ) in allowed_pairs
+
+    return any(
+        run_dir.name.startswith(f"{model}_{condition}_")
+        for model, condition in allowed_pairs
+    )
+
+
+def print_summary_table(
+    run_grid: dict[tuple[str, str], dict[str, Any]],
+    model_order: list[str],
+    condition_order: list[str],
+) -> None:
     hdr = f"{'Model':<20} {'Condition':<14} {'Pass':<6} {'N':<4} {'Rate':<7} {'Infra':<7} {'Avg Dur':<9} {'Avg Msgs':<10} {'Termination Reasons'}"
     print("=" * len(hdr))
     print(hdr)
     print("-" * len(hdr))
 
-    for model in MODEL_ORDER:
-        for condition in CONDITION_ORDER:
+    for model in model_order:
+        for condition in condition_order:
             key = (model, condition)
-            if key in grid:
-                r = grid[key]
-                passed = r.get("full_reward_count", 0)
-                total = r.get("num_simulations", 0)
-                terms = r.get("_term_counts", {})
+            if key in run_grid:
+                run = run_grid[key]
+                passed = run.get("full_reward_count", 0)
+                total = run.get("num_simulations", 0)
+                terms = run.get("_term_counts", {})
                 infra = terms.get("infrastructure_error", 0)
                 clean = total - infra
                 rate = f"{passed / clean * 100:.0f}%" if clean > 0 else "-"
                 infra_str = f"({infra})" if infra > 0 else ""
-                avg_dur = f"{r.get('_avg_duration', 0):.0f}s"
-                avg_msgs = f"{r.get('_avg_messages', 0):.0f}"
+                avg_dur = f"{run.get('_avg_duration', 0):.0f}s"
+                avg_msgs = f"{run.get('_avg_messages', 0):.0f}"
                 term_str = ", ".join(f"{k}:{v}" for k, v in sorted(terms.items()))
                 print(
                     f"{model:<20} {condition:<14} {passed:<6} {clean:<4} {rate:<7} {infra_str:<7} {avg_dur:<9} {avg_msgs:<10} {term_str}"
@@ -125,20 +184,20 @@ def print_summary_table(runs: list[dict]) -> None:
     print("=" * len(hdr))
 
 
-def print_detailed_view(runs: list[dict]) -> None:
-    for r in runs:
-        tasks = r.get("_tasks", [])
+def print_detailed_view(ordered_runs: list[dict[str, Any]]) -> None:
+    for run in ordered_runs:
+        tasks = run.get("_tasks", [])
         if not tasks:
             continue
 
-        model = r.get("model", "?")
-        condition = r.get("condition", "?")
-        passed = r.get("full_reward_count", 0)
-        total = r.get("num_simulations", 0)
+        model = run.get("model", "?")
+        condition = run.get("condition", "?")
+        passed = run.get("full_reward_count", 0)
+        total = run.get("num_simulations", 0)
 
         print(f"\n{'━' * 90}")
         print(
-            f"  {model} / {condition}  —  {passed}/{total} passed  —  total {r.get('_total_duration', 0):.0f}s"
+            f"  {model} / {condition}  —  {passed}/{total} passed  —  total {run.get('_total_duration', 0):.0f}s"
         )
         print(f"{'━' * 90}")
         print(
@@ -146,57 +205,82 @@ def print_detailed_view(runs: list[dict]) -> None:
         )
         print(f"  {'─' * 86}")
 
-        for t in tasks:
-            reward_icon = "✓" if t["reward"] >= 1.0 else "✗"
-            reward_str = f"{reward_icon} {t['reward']:.1f}"
-            if t["action_total"] > 0:
-                action_str = f"{t['action_reward']:.0f}/{t['action_total']}"
+        for task in tasks:
+            reward_icon = "✓" if task["reward"] >= 1.0 else "✗"
+            reward_str = f"{reward_icon} {task['reward']:.1f}"
+            if task["action_total"] > 0:
+                action_str = f"{task['action_reward']:.0f}/{task['action_total']}"
             else:
                 action_str = "-"
-            duration = f"{t['duration']:.0f}s"
+            duration = f"{task['duration']:.0f}s"
             print(
-                f"  {t['task']:<52} {reward_str:<6} {action_str:<10} {t['termination']:<18} {t['messages']:<6} {duration}"
+                f"  {task['task']:<52} {reward_str:<6} {action_str:<10} {task['termination']:<18} {task['messages']:<6} {duration}"
             )
         print()
 
 
-def main() -> None:
-    if not RESULTS_ROOT.exists():
-        print("No results found yet.")
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    config = load_config(Path(args.config))
+    results_root = resolve_results_root(config)
+    model_order = [model.short_name for model in load_models(config, [])]
+    condition_order = [condition.name for condition in load_conditions(config, [])]
+    allowed_pairs = {
+        (model, condition) for model in model_order for condition in condition_order
+    }
+    total_configs = len(model_order) * len(condition_order)
+    experiment_name = config.get("experiment", {}).get("name", results_root.name)
+
+    if not results_root.exists():
+        print(f"No results found yet in {results_root}.")
         sys.exit(0)
 
+    run_dirs = [
+        run_dir
+        for run_dir in sorted(results_root.iterdir())
+        if run_dir.is_dir() and not run_dir.name.startswith("summary")
+    ]
     runs = []
-    for d in sorted(RESULTS_ROOT.iterdir()):
-        if not d.is_dir() or d.name.startswith("summary"):
+    in_progress_dirs = []
+    for run_dir in run_dirs:
+        summary = load_run_summary(run_dir)
+        if not matches_config_run(run_dir, summary, allowed_pairs):
             continue
-        data = load_run_data(d)
+        data = load_run_data(run_dir, summary)
         if data:
             runs.append(data)
+            continue
+        if (summary and summary.get("status") == "running") or (
+            summary is None and (run_dir / "results.json").exists()
+        ):
+            in_progress_dirs.append(run_dir)
 
     if not runs:
         print("No completed runs found. Checking for in-progress...")
-        for d in sorted(RESULTS_ROOT.iterdir()):
-            if d.is_dir() and (d / "results.json").exists():
-                print(f"  {d.name}: results.json exists (no summary yet)")
+        for run_dir in in_progress_dirs:
+            print(f"  {run_dir.name}: in progress")
         sys.exit(0)
 
-    print(f"\n  Phase 1 Results  —  {len(runs)}/16 configurations completed\n")
-    print_summary_table(runs)
+    run_grid = build_run_grid(runs)
+    ordered_runs = [
+        run_grid[(model, condition)]
+        for model in model_order
+        for condition in condition_order
+        if (model, condition) in run_grid
+    ]
 
-    if "--detail" in sys.argv or "-d" in sys.argv:
-        print_detailed_view(runs)
+    print(
+        f"\n  Results: {experiment_name}  —  {len(run_grid)}/{total_configs} configurations completed\n"
+    )
+    print_summary_table(run_grid, model_order, condition_order)
+
+    if args.detail:
+        print_detailed_view(ordered_runs)
     else:
         print("  Tip: run with --detail or -d for per-task breakdown\n")
 
-    # In-progress
-    all_dirs = [
-        d
-        for d in RESULTS_ROOT.iterdir()
-        if d.is_dir() and not d.name.startswith("summary")
-    ]
-    in_progress = len(all_dirs) - len(runs)
-    if in_progress > 0:
-        print(f"  {in_progress} run(s) in progress")
+    if in_progress_dirs:
+        print(f"  {len(in_progress_dirs)} run(s) in progress")
 
 
 if __name__ == "__main__":

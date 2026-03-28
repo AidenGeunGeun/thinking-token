@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run Phase 1: 10 telecom tasks x 3 models x 6 conditions = 180 runs."""
+"""Run a configured thinking-token retention benchmark experiment."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def utc_timestamp() -> str:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", default=str(CONFIG_PATH), help="path to phase1.yaml"
+        "--config", default=str(CONFIG_PATH), help="path to experiment config"
     )
     parser.add_argument(
         "--model",
@@ -352,6 +352,7 @@ def print_plan(
     *,
     smoke: bool = False,
 ) -> None:
+    experiment_name = config.get("experiment", {}).get("name", "experiment")
     if smoke:
         task_count = 1 if task_ids else 0
     elif task_ids and task_ids[0].startswith("<select "):
@@ -361,7 +362,7 @@ def print_plan(
     total_runs = (
         len(models) * len(conditions) * config["experiment"]["trials"] * task_count
     )
-    print("Phase 1 plan")
+    print(f"Experiment plan: {experiment_name}")
     print(
         f"- benchmark: {config['experiment']['benchmark']} "
         f"({config['experiment']['domain']}/{config['experiment']['task_split']})"
@@ -554,6 +555,7 @@ def cleanup_partial_run(run_dir: Path, exc: BaseException | None = None) -> None
 
 def execute_condition_run_with_cleanup(
     run_dir: Path,
+    config: dict[str, Any],
     experiment: dict[str, Any],
     user_llm: str,
     model: ModelConfig,
@@ -564,6 +566,7 @@ def execute_condition_run_with_cleanup(
     try:
         return execute_condition_run(
             run_dir=run_dir,
+            config=config,
             experiment=experiment,
             user_llm=user_llm,
             model=model,
@@ -750,6 +753,10 @@ def merge_agent_thinking_records(
 ) -> list[dict[str, Any]]:
     merged_records: list[dict[str, Any]] = []
     agent_idx = 0
+    expected_agent_records = sum(
+        int(record["assistant_message_count"]) for record in records
+    )
+    task_run_count = len({(record["task_id"], record["trial"]) for record in records})
 
     for record in records:
         assistant_count = int(record["assistant_message_count"])
@@ -760,7 +767,9 @@ def merge_agent_thinking_records(
         next_agent_idx = agent_idx + assistant_count
         if next_agent_idx > len(agent_records):
             raise ValueError(
-                "Agent thinking records do not align with trajectory assistant messages"
+                "Agent thinking records do not align with trajectory assistant messages: "
+                f"expected {expected_agent_records} assistant-message records across "
+                f"{task_run_count} task/trial runs, got {len(agent_records)}"
             )
 
         turn_agent_records = agent_records[agent_idx:next_agent_idx]
@@ -792,8 +801,10 @@ def merge_agent_thinking_records(
     if agent_idx != len(agent_records):
         extra = len(agent_records) - agent_idx
         print(
-            f"  WARNING: {extra} extra agent thinking records "
-            f"(likely from tau2 task retries); discarding overflow"
+            f"  WARNING: discarding {extra} overflow agent thinking records across "
+            f"{task_run_count} task/trial runs; expected {agent_idx} assistant-message "
+            f"records from trajectory data, got {len(agent_records)} "
+            "(likely from tau2 task retries)"
         )
 
     return merged_records
@@ -840,6 +851,7 @@ def save_thinking_analysis(run_dir: Path, results, condition: ConditionConfig) -
 
 def execute_condition_run(
     run_dir: Path,
+    config: dict[str, Any],
     experiment: dict[str, Any],
     user_llm: str,
     model: ModelConfig,
@@ -876,7 +888,7 @@ def execute_condition_run(
         "generated_at": datetime.now(UTC).isoformat(),
     }
     write_summary(run_dir / "summary.json", initial_summary)
-    config = TextRunConfig(
+    run_config = TextRunConfig(
         domain=experiment["domain"],
         task_set_name=experiment["domain"],
         task_split_name=experiment["task_split"],
@@ -884,7 +896,7 @@ def execute_condition_run(
         num_trials=experiment["trials"],
         agent="thinking_retention",
         llm_agent=agent_llm_name(model),
-        llm_args_agent=agent_llm_args(condition, port, model),
+        llm_args_agent=agent_llm_args(condition, port, model, config),
         user="user_simulator",
         llm_user=user_llm,
         llm_args_user={},
@@ -894,7 +906,7 @@ def execute_condition_run(
 
     clear_thinking_records()
     results = run_tasks(
-        config,
+        run_config,
         tasks,
         save_path=run_dir / "results.json",
         save_dir=run_dir,
@@ -1022,6 +1034,7 @@ def main(args: argparse.Namespace) -> None:
                     configure_condition_environment(condition, config)
                     summary = execute_condition_run_with_cleanup(
                         run_dir=run_dir,
+                        config=config,
                         experiment=config["experiment"],
                         user_llm=user_llm,
                         model=model,
