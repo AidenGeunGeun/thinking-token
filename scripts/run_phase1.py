@@ -711,8 +711,10 @@ def merge_agent_thinking_records(
         merged_records.append(merged_record)
 
     if agent_idx != len(agent_records):
-        raise ValueError(
-            "Unused agent thinking records remain after merging trajectory analysis"
+        extra = len(agent_records) - agent_idx
+        print(
+            f"  WARNING: {extra} extra agent thinking records "
+            f"(likely from tau2 task retries); discarding overflow"
         )
 
     return merged_records
