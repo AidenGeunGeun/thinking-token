@@ -977,11 +977,11 @@ class RunPhase1Test(unittest.TestCase):
             stack.enter_context(
                 mock.patch.multiple(
                     run_phase1,
-                    RESULTS_ROOT=results_root,
                     load_config=mock.Mock(return_value=config),
                     load_models=mock.Mock(return_value=models),
                     load_conditions=mock.Mock(return_value=conditions),
                     load_task_ids=mock.Mock(return_value=["task-1"]),
+                    resolve_results_root=mock.Mock(return_value=results_root),
                     print_plan=mock.Mock(),
                     validate_runtime_environment=mock.Mock(
                         return_value="/tmp/llama-server"

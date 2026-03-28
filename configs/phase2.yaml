@@ -1,0 +1,55 @@
+{
+  "experiment": {
+    "name": "phase2-full-telecom",
+    "benchmark": "tau2-bench",
+    "domain": "telecom",
+    "task_split": "base",
+    "tasks_file": "configs/phase2_tasks.json",
+    "results_dir": "results/phase2",
+    "trials": 1
+  },
+  "models": [
+    {
+      "hf_repo": "unsloth/Qwen3.5-4B-GGUF",
+      "hf_file": "Qwen3.5-4B-Q8_0.gguf",
+      "short_name": "qwen35-4b"
+    },
+    {
+      "hf_repo": "unsloth/Qwen3.5-9B-GGUF",
+      "hf_file": "Qwen3.5-9B-Q8_0.gguf",
+      "short_name": "qwen35-9b"
+    }
+  ],
+  "conditions": [
+    {
+      "name": "strip_all",
+      "enable_thinking": true,
+      "retention_strategy": "strip_all",
+      "summarize_thinking": false
+    },
+    {
+      "name": "raw_window3",
+      "enable_thinking": true,
+      "retention_strategy": "window_3",
+      "summarize_thinking": false
+    },
+    {
+      "name": "raw_retain",
+      "enable_thinking": true,
+      "retention_strategy": "retain_all",
+      "summarize_thinking": false
+    }
+  ],
+  "user_sim": {
+    "model": "xiaomi/mimo-v2-flash",
+    "provider": "openrouter"
+  },
+  "generation": {
+    "max_tokens": 8192,
+    "turn_delay_seconds": 0.0
+  },
+  "llama": {
+    "base_args": "--jinja --flash-attn on --n-gpu-layers 99 --ctx-size 131072 --cache-type-k q8_0 --cache-type-v q8_0 --reasoning-format none --chat-template-file configs/chat_template.jinja",
+    "port": 8080
+  }
+}

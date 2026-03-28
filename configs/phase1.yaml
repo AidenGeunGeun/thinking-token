@@ -4,6 +4,8 @@
     "benchmark": "tau2-bench",
     "domain": "telecom",
     "task_split": "base",
+    "tasks_file": "configs/phase1_tasks.json",
+    "results_dir": "results/phase1",
     "task_subset": 10,
     "trials": 1
   },

@@ -66,8 +66,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 CONFIG_PATH = PROJECT_ROOT / "configs" / "phase1.yaml"
-TASKS_PATH = PROJECT_ROOT / "configs" / "phase1_tasks.json"
-RESULTS_ROOT = PROJECT_ROOT / "results" / "phase1"
+# Defaults for Phase 1; overridden by config fields tasks_file / results_dir
+_DEFAULT_TASKS_PATH = PROJECT_ROOT / "configs" / "phase1_tasks.json"
+_DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results" / "phase1"
 DEFAULT_LLAMA_SERVER = "/workspace/llama.cpp/build/bin/llama-server"
 _shutdown_requested = False
 
@@ -154,11 +155,28 @@ def load_conditions(
     return filtered
 
 
+def resolve_tasks_path(config: dict[str, Any]) -> Path:
+    """Resolve the tasks file path from config or fall back to default."""
+    tasks_file = config.get("experiment", {}).get("tasks_file")
+    if tasks_file:
+        return PROJECT_ROOT / tasks_file
+    return _DEFAULT_TASKS_PATH
+
+
+def resolve_results_root(config: dict[str, Any]) -> Path:
+    """Resolve the results directory from config or fall back to default."""
+    results_dir = config.get("experiment", {}).get("results_dir")
+    if results_dir:
+        return PROJECT_ROOT / results_dir
+    return _DEFAULT_RESULTS_ROOT
+
+
 def load_task_ids(config: dict[str, Any]) -> list[str]:
-    if TASKS_PATH.exists():
-        payload = json.loads(TASKS_PATH.read_text(encoding="utf-8"))
+    tasks_path = resolve_tasks_path(config)
+    if tasks_path.exists():
+        payload = json.loads(tasks_path.read_text(encoding="utf-8"))
         return list(payload.get("task_ids", []))
-    subset = config["experiment"]["task_subset"]
+    subset = config["experiment"].get("task_subset", "?")
     return [f"<select {subset} telecom tasks with scripts/select_tasks.py>"]
 
 
@@ -909,6 +927,7 @@ def main(args: argparse.Namespace) -> None:
     models = load_models(config, args.model)
     conditions = load_conditions(config, args.condition)
     task_ids = load_task_ids(config)
+    results_root = resolve_results_root(config)
 
     if args.smoke:
         models, conditions, task_ids = apply_smoke_selection(
@@ -936,7 +955,7 @@ def main(args: argparse.Namespace) -> None:
             os.environ["HF_HOME"] = "/workspace/hf_cache"
             os.environ["HUGGINGFACE_HUB_CACHE"] = "/workspace/hf_cache"
 
-        RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
+        results_root.mkdir(parents=True, exist_ok=True)
         if args.fresh:
             print("Fresh run: ignoring existing results")
             completed_conditions: set[tuple[str, str]] = set()
@@ -945,7 +964,7 @@ def main(args: argparse.Namespace) -> None:
         else:
             completed_conditions = set(
                 collect_completed_conditions(
-                    RESULTS_ROOT,
+                    results_root,
                     models,
                     conditions,
                     task_ids,
@@ -963,7 +982,7 @@ def main(args: argparse.Namespace) -> None:
 
         for model in models:
             model_timestamp = utc_timestamp()
-            log_path = RESULTS_ROOT / f"{model.short_name}_{model_timestamp}_llama.log"
+            log_path = results_root / f"{model.short_name}_{model_timestamp}_llama.log"
             log_path.parent.mkdir(parents=True, exist_ok=True)
             process = None
             log_handle = log_path.open("w", encoding="utf-8")
@@ -996,7 +1015,7 @@ def main(args: argparse.Namespace) -> None:
 
                     run_timestamp = utc_timestamp()
                     run_dir = (
-                        RESULTS_ROOT
+                        results_root
                         / f"{model.short_name}_{condition.name}_{run_timestamp}"
                     )
                     print(f"Running {model.short_name} / {condition.name} -> {run_dir}")
@@ -1029,7 +1048,7 @@ def main(args: argparse.Namespace) -> None:
             "generated_at": datetime.now(UTC).isoformat(),
             "runs": all_summaries,
         }
-        write_summary(RESULTS_ROOT / f"summary_{utc_timestamp()}.json", manifest)
+        write_summary(results_root / f"summary_{utc_timestamp()}.json", manifest)
     finally:
         if previous_sigint_handler is not None:
             signal.signal(signal.SIGINT, previous_sigint_handler)
