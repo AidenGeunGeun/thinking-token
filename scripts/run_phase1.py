@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import os
 import shlex
@@ -13,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -71,6 +73,9 @@ _DEFAULT_TASKS_PATH = PROJECT_ROOT / "configs" / "phase1_tasks.json"
 _DEFAULT_RESULTS_ROOT = PROJECT_ROOT / "results" / "phase1"
 DEFAULT_LLAMA_SERVER = "/workspace/llama.cpp/build/bin/llama-server"
 _shutdown_requested = False
+PROGRESS_FILE = "progress.json"
+TASK_CHECKPOINTS_DIR = ".task_checkpoints"
+TASK_RESULTS_SCRATCH = ".task_results.json"
 
 
 @dataclass(frozen=True)
@@ -438,6 +443,277 @@ def _results_metadata(results_path: Path) -> tuple[int, bool] | None:
     return len(simulations), has_meaningful_simulation
 
 
+def _serialize_json_value(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, list | tuple):
+        return [_serialize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _serialize_json_value(item) for key, item in value.items()}
+    if is_dataclass(value) and not isinstance(value, type):
+        return _serialize_json_value(asdict(value))
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _serialize_json_value(model_dump(mode="json"))
+        except TypeError:
+            return _serialize_json_value(model_dump())
+    model_dump_json = getattr(value, "model_dump_json", None)
+    if callable(model_dump_json):
+        return json.loads(str(model_dump_json()))
+    if hasattr(value, "__dict__"):
+        return {
+            key: _serialize_json_value(item)
+            for key, item in vars(value).items()
+            if not key.startswith("_")
+        }
+    return value
+
+
+def _serialize_results_payload(results: Any) -> dict[str, Any]:
+    payload = _serialize_json_value(results)
+    if isinstance(payload, dict):
+        payload.setdefault("simulations", [])
+        return payload
+    simulations = getattr(results, "simulations", [])
+    return {"simulations": _serialize_json_value(simulations)}
+
+
+def _task_checkpoint_dir(run_dir: Path) -> Path:
+    return run_dir / TASK_CHECKPOINTS_DIR
+
+
+def _task_checkpoint_path(run_dir: Path, task_id: str) -> Path:
+    digest = hashlib.sha1(task_id.encode("utf-8")).hexdigest()
+    return _task_checkpoint_dir(run_dir) / f"{digest}.json"
+
+
+def _task_results_scratch_path(run_dir: Path) -> Path:
+    return run_dir / TASK_RESULTS_SCRATCH
+
+
+def _read_progress(run_dir: Path) -> dict[str, Any] | None:
+    return _read_json_file(run_dir / PROGRESS_FILE)
+
+
+def _write_progress(
+    run_dir: Path,
+    completed_task_ids: list[str],
+    *,
+    num_simulations: int,
+) -> None:
+    write_summary(
+        run_dir / PROGRESS_FILE,
+        {
+            "completed_task_ids": completed_task_ids,
+            "num_completed_tasks": len(completed_task_ids),
+            "num_simulations": num_simulations,
+            "generated_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def _run_has_checkpoint_state(run_dir: Path) -> bool:
+    checkpoint_dir = _task_checkpoint_dir(run_dir)
+    if checkpoint_dir.is_dir() and any(checkpoint_dir.glob("*.json")):
+        return True
+    progress = _read_progress(run_dir) or {}
+    completed_task_ids = progress.get("completed_task_ids")
+    return isinstance(completed_task_ids, list) and bool(completed_task_ids)
+
+
+def _load_task_checkpoints(run_dir: Path) -> dict[str, dict[str, Any]]:
+    checkpoint_dir = _task_checkpoint_dir(run_dir)
+    if not checkpoint_dir.exists():
+        return {}
+    checkpoints: dict[str, dict[str, Any]] = {}
+    for checkpoint_path in sorted(checkpoint_dir.glob("*.json")):
+        payload = _read_json_file(checkpoint_path)
+        if payload is None:
+            continue
+        task_id = payload.get("task_id")
+        results_payload = payload.get("results")
+        thinking_records = payload.get("thinking_records")
+        if not isinstance(task_id, str):
+            continue
+        if not isinstance(results_payload, dict):
+            continue
+        if not isinstance(thinking_records, list):
+            continue
+        checkpoints[task_id] = payload
+    return checkpoints
+
+
+def _write_task_checkpoint(
+    run_dir: Path,
+    task_id: str,
+    results_payload: dict[str, Any],
+    thinking_records: list[dict[str, Any]],
+) -> None:
+    checkpoint_dir = _task_checkpoint_dir(run_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    write_summary(
+        _task_checkpoint_path(run_dir, task_id),
+        {
+            "task_id": task_id,
+            "results": results_payload,
+            "thinking_records": thinking_records,
+            "generated_at": datetime.now(UTC).isoformat(),
+        },
+    )
+
+
+def _simulation_sort_key(
+    simulation: dict[str, Any], task_order: dict[str, int], original_index: int
+) -> tuple[int, int, int]:
+    trial = simulation.get("trial", 0)
+    if not isinstance(trial, int):
+        trial = 0
+    task_id = simulation.get("task_id")
+    if not isinstance(task_id, str):
+        task_id = ""
+    task_index = task_order.get(task_id, len(task_order))
+    return trial, task_index, original_index
+
+
+def _aggregate_results_payload(
+    task_ids: list[str],
+    checkpoints: dict[str, dict[str, Any]],
+    full_tasks: list[Any],
+) -> dict[str, Any] | None:
+    ordered_checkpoints = [
+        checkpoints[task_id] for task_id in task_ids if task_id in checkpoints
+    ]
+    if not ordered_checkpoints:
+        return None
+
+    payload = copy.deepcopy(ordered_checkpoints[0]["results"])
+    task_order = {task_id: index for index, task_id in enumerate(task_ids)}
+    simulations: list[dict[str, Any]] = []
+    for checkpoint in ordered_checkpoints:
+        result_payload = checkpoint["results"]
+        result_simulations = result_payload.get("simulations", [])
+        if isinstance(result_simulations, list):
+            simulations.extend(copy.deepcopy(result_simulations))
+
+    simulations = [
+        simulation
+        for _, simulation in sorted(
+            enumerate(simulations),
+            key=lambda item: _simulation_sort_key(item[1], task_order, item[0]),
+        )
+    ]
+    payload["simulations"] = simulations
+    payload["tasks"] = _serialize_json_value(full_tasks)
+    return payload
+
+
+def _aggregate_thinking_records(
+    task_ids: list[str], checkpoints: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for task_id in task_ids:
+        checkpoint = checkpoints.get(task_id)
+        if checkpoint is None:
+            continue
+        records.extend(copy.deepcopy(checkpoint["thinking_records"]))
+    return records
+
+
+def _write_jsonl_records(
+    path: Path, records: list[dict[str, Any]], *, append: bool
+) -> None:
+    if not records and append:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "a" if append else "w"
+    with path.open(mode, encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record) + "\n")
+
+
+def _rebuild_checkpoint_artifacts(
+    run_dir: Path,
+    task_ids: list[str],
+    full_tasks: list[Any],
+) -> tuple[dict[str, dict[str, Any]], list[str], int]:
+    checkpoints = _load_task_checkpoints(run_dir)
+    completed_task_ids = [task_id for task_id in task_ids if task_id in checkpoints]
+    results_payload = _aggregate_results_payload(task_ids, checkpoints, full_tasks)
+    num_simulations = 0
+    if results_payload is not None:
+        simulations = results_payload.get("simulations", [])
+        num_simulations = len(simulations) if isinstance(simulations, list) else 0
+        write_summary(run_dir / "results.json", results_payload)
+    thinking_records = _aggregate_thinking_records(task_ids, checkpoints)
+    if checkpoints or (run_dir / "thinking_analysis.jsonl").exists():
+        _write_jsonl_records(
+            run_dir / "thinking_analysis.jsonl",
+            thinking_records,
+            append=False,
+        )
+    _write_progress(run_dir, completed_task_ids, num_simulations=num_simulations)
+    return checkpoints, completed_task_ids, num_simulations
+
+
+def _simulation_reward(simulation: Any) -> float:
+    reward_info = (
+        simulation.get("reward_info")
+        if isinstance(simulation, dict)
+        else getattr(simulation, "reward_info", None)
+    )
+    if isinstance(reward_info, dict):
+        reward = reward_info.get("reward", 0.0)
+    elif reward_info is not None:
+        reward = getattr(reward_info, "reward", 0.0)
+    else:
+        reward = 0.0
+    return float(reward or 0.0)
+
+
+def _full_reward_count(simulations: list[Any]) -> int:
+    return sum(1 for simulation in simulations if _simulation_reward(simulation) >= 1.0)
+
+
+def _task_id_value(task: Any) -> str | None:
+    if isinstance(task, str):
+        return task
+    task_id = getattr(task, "id", None)
+    return task_id if isinstance(task_id, str) else None
+
+
+def find_resumable_condition_run(
+    results_root: Path,
+    model_short_name: str,
+    condition_name: str,
+    *,
+    task_ids: list[str],
+) -> Path | None:
+    pattern = f"{model_short_name}_{condition_name}_*/summary.json"
+    candidates: list[tuple[int, Path]] = []
+    for summary_path in sorted(results_root.glob(pattern), reverse=True):
+        payload = _read_json_file(summary_path)
+        if payload is None:
+            continue
+        if payload.get("status") == "complete":
+            continue
+        if payload.get("task_ids") != task_ids:
+            continue
+        run_dir = summary_path.parent
+        score = (
+            1
+            if _run_has_checkpoint_state(run_dir) or (run_dir / "results.json").exists()
+            else 0
+        )
+        candidates.append((score, run_dir))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+    return candidates[0][1]
+
+
 def apply_smoke_selection(
     models: list[ModelConfig],
     conditions: list[ConditionConfig],
@@ -539,7 +815,7 @@ def cleanup_partial_run(run_dir: Path, exc: BaseException | None = None) -> None
     results_path = run_dir / "results.json"
     if not run_dir.exists():
         return
-    if results_path.exists():
+    if results_path.exists() or _run_has_checkpoint_state(run_dir):
         payload = _read_json_file(summary_path) or {}
         payload["status"] = "failed"
         payload["error"] = (
@@ -838,15 +1114,25 @@ def abort_on_thinking_contamination(run_dir: Path, summary: dict[str, Any]) -> N
     )
 
 
-def save_thinking_analysis(run_dir: Path, results, condition: ConditionConfig) -> None:
+def collect_thinking_analysis_records(
+    results, condition: ConditionConfig
+) -> list[dict[str, Any]]:
     from src.agent import get_thinking_records
 
     records = build_thinking_records(results, condition)
-    records = merge_agent_thinking_records(records, get_thinking_records())
+    return merge_agent_thinking_records(records, get_thinking_records())
+
+
+def save_thinking_analysis(
+    run_dir: Path,
+    results,
+    condition: ConditionConfig,
+    *,
+    append: bool = False,
+) -> None:
+    records = collect_thinking_analysis_records(results, condition)
     output_path = run_dir / "thinking_analysis.jsonl"
-    with output_path.open("w", encoding="utf-8") as handle:
-        for record in records:
-            handle.write(json.dumps(record) + "\n")
+    _write_jsonl_records(output_path, records, append=append)
 
 
 def execute_condition_run(
@@ -876,6 +1162,11 @@ def execute_condition_run(
         task_ids=task_ids,
     )
     run_dir.mkdir(parents=True, exist_ok=True)
+    checkpoints, completed_task_ids, num_simulations = _rebuild_checkpoint_artifacts(
+        run_dir,
+        task_ids,
+        tasks,
+    )
     initial_summary = {
         "model": model.short_name,
         "model_hf_repo": model.hf_repo,
@@ -884,10 +1175,31 @@ def execute_condition_run(
         "enable_thinking": condition.enable_thinking,
         "retention_strategy": condition.retention_strategy,
         "task_ids": task_ids,
-        "status": "running",
         "generated_at": datetime.now(UTC).isoformat(),
     }
-    write_summary(run_dir / "summary.json", initial_summary)
+
+    def _current_simulations() -> list[dict[str, Any]]:
+        payload = _aggregate_results_payload(task_ids, checkpoints, tasks)
+        if payload is None:
+            return []
+        simulations = payload.get("simulations", [])
+        return simulations if isinstance(simulations, list) else []
+
+    def _write_running_summary() -> None:
+        simulations = _current_simulations()
+        write_summary(
+            run_dir / "summary.json",
+            {
+                **initial_summary,
+                "status": "running",
+                "completed_task_ids": completed_task_ids,
+                "num_simulations": len(simulations),
+                "full_reward_count": _full_reward_count(simulations),
+                "generated_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+    _write_running_summary()
     run_config = TextRunConfig(
         domain=experiment["domain"],
         task_set_name=experiment["domain"],
@@ -903,28 +1215,73 @@ def execute_condition_run(
         max_concurrency=1,
         verbose_logs=False,
     )
+    remaining_tasks = [
+        task for task in tasks if _task_id_value(task) not in set(completed_task_ids)
+    ]
+    scratch_results_path = _task_results_scratch_path(run_dir)
 
-    clear_thinking_records()
-    results = run_tasks(
-        run_config,
-        tasks,
-        save_path=run_dir / "results.json",
-        save_dir=run_dir,
-        console_display=True,
-    )
-    save_thinking_analysis(run_dir, results, condition)
+    try:
+        for task in remaining_tasks:
+            task_id = _task_id_value(task)
+            if task_id is None:
+                raise RuntimeError("Task is missing a string id")
 
-    passed = sum(
-        1
-        for simulation in results.simulations
-        if simulation.reward_info is not None and simulation.reward_info.reward >= 1.0
-    )
+            clear_thinking_records()
+            scratch_results_path.unlink(missing_ok=True)
+            task_results = run_tasks(
+                run_config,
+                [task],
+                save_path=scratch_results_path,
+                save_dir=run_dir,
+                console_display=True,
+            )
+            task_results_payload = _serialize_results_payload(task_results)
+            task_thinking_records = collect_thinking_analysis_records(
+                task_results, condition
+            )
+            _write_task_checkpoint(
+                run_dir,
+                task_id,
+                task_results_payload,
+                task_thinking_records,
+            )
+            checkpoints[task_id] = {
+                "task_id": task_id,
+                "results": task_results_payload,
+                "thinking_records": task_thinking_records,
+            }
+            _write_jsonl_records(
+                run_dir / "thinking_analysis.jsonl",
+                task_thinking_records,
+                append=True,
+            )
+            results_payload = _aggregate_results_payload(task_ids, checkpoints, tasks)
+            if results_payload is not None:
+                simulations = results_payload.get("simulations", [])
+                num_simulations = (
+                    len(simulations) if isinstance(simulations, list) else 0
+                )
+                write_summary(run_dir / "results.json", results_payload)
+            completed_task_ids = [
+                task_id for task_id in task_ids if task_id in checkpoints
+            ]
+            _write_progress(
+                run_dir,
+                completed_task_ids,
+                num_simulations=num_simulations,
+            )
+            _write_running_summary()
+    finally:
+        scratch_results_path.unlink(missing_ok=True)
+
+    simulations = _current_simulations()
     summary = {
         **initial_summary,
         "task_ids": task_ids,
         "status": "complete",
-        "num_simulations": len(results.simulations),
-        "full_reward_count": passed,
+        "completed_task_ids": completed_task_ids,
+        "num_simulations": len(simulations),
+        "full_reward_count": _full_reward_count(simulations),
         "contaminated": False,
         "generated_at": datetime.now(UTC).isoformat(),
     }
@@ -1025,12 +1382,27 @@ def main(args: argparse.Namespace) -> None:
                         )
                         continue
 
-                    run_timestamp = utc_timestamp()
-                    run_dir = (
-                        results_root
-                        / f"{model.short_name}_{condition.name}_{run_timestamp}"
-                    )
-                    print(f"Running {model.short_name} / {condition.name} -> {run_dir}")
+                    run_dir = None
+                    if resume_enabled:
+                        run_dir = find_resumable_condition_run(
+                            results_root,
+                            model.short_name,
+                            condition.name,
+                            task_ids=task_ids,
+                        )
+                    if run_dir is None:
+                        run_timestamp = utc_timestamp()
+                        run_dir = (
+                            results_root
+                            / f"{model.short_name}_{condition.name}_{run_timestamp}"
+                        )
+                        print(
+                            f"Running {model.short_name} / {condition.name} -> {run_dir}"
+                        )
+                    else:
+                        print(
+                            f"Resuming {model.short_name} / {condition.name} -> {run_dir}"
+                        )
                     configure_condition_environment(condition, config)
                     summary = execute_condition_run_with_cleanup(
                         run_dir=run_dir,

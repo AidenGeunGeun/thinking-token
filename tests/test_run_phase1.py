@@ -11,6 +11,7 @@ from contextlib import ExitStack, contextmanager, redirect_stdout
 from dataclasses import dataclass
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from types import ModuleType
 from typing import cast
 from unittest import mock
@@ -29,6 +30,9 @@ class MockSimulation:
     task_id: str
     trial: int
     messages: list[MockMessage]
+    reward_info: object | None = None
+    duration: float = 0.0
+    termination_reason: str = "completed"
 
     def get_messages(self) -> list[MockMessage]:
         return self.messages
@@ -313,15 +317,15 @@ class RunPhase1Test(unittest.TestCase):
             )
             self.assertEqual(llm_args_agent["max_tokens"], 1234)
             self.assertEqual(tasks, ["task-1"])
-            results_path = save_dir / "results.json"
-            self.assertEqual(save_path, results_path)
+            self.assertTrue(
+                Path(cast(str | os.PathLike[str], save_path)).parent == save_dir
+            )
             self.assertTrue(console_display)
             summary = json.loads(
                 (save_dir / "summary.json").read_text(encoding="utf-8")
             )
             self.assertEqual(summary["status"], "running")
             self.assertEqual(summary["task_ids"], ["task-1"])
-            results_path.write_text(json.dumps({"simulations": []}), encoding="utf-8")
             return MockResults(simulations=[])
 
         tau2_module = ModuleType("tau2")
@@ -369,12 +373,173 @@ class RunPhase1Test(unittest.TestCase):
                 written_summary = json.loads(
                     (run_dir / "summary.json").read_text(encoding="utf-8")
                 )
+                written_results = json.loads(
+                    (run_dir / "results.json").read_text(encoding="utf-8")
+                )
 
         self.assertEqual(summary["num_simulations"], 0)
         self.assertEqual(summary["condition"], "retain_all")
         self.assertEqual(summary["status"], "complete")
         self.assertEqual(agent_module.get_thinking_records(), [])
         self.assertEqual(written_summary["status"], "complete")
+        self.assertEqual(written_results["simulations"], [])
+
+    def test_execute_condition_run_resumes_from_last_completed_task(self) -> None:
+        import importlib
+
+        agent_module = importlib.import_module("src.agent")
+        task_objects = [SimpleNamespace(id="task-1"), SimpleNamespace(id="task-2")]
+        run_calls: list[str] = []
+        task2_should_fail = True
+
+        class FakeTextRunConfig:
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        def fake_get_tasks(
+            domain: str, task_split_name: str, task_ids: list[str]
+        ) -> list[SimpleNamespace]:
+            self.assertEqual(domain, "telecom")
+            self.assertEqual(task_split_name, "phase1")
+            self.assertEqual(task_ids, ["task-1", "task-2"])
+            return task_objects
+
+        def fake_run_tasks(
+            config: object,
+            tasks: object,
+            save_path: object,
+            save_dir: Path,
+            console_display: object,
+        ) -> MockResults:
+            self.assertEqual(agent_module.get_thinking_records(), [])
+            self.assertIsInstance(config, FakeTextRunConfig)
+            self.assertTrue(console_display)
+            self.assertTrue(
+                Path(cast(str | os.PathLike[str], save_path)).parent == save_dir
+            )
+            task_id = cast(list[SimpleNamespace], tasks)[0].id
+            run_calls.append(task_id)
+            if task_id == "task-2" and task2_should_fail:
+                raise RuntimeError("boom")
+            agent_module._thinking_records.append(
+                {
+                    "raw_thinking_chars": 5,
+                    "raw_thinking_tokens_approx": 1,
+                    "summary_chars": None,
+                    "summary_tokens_approx": None,
+                    "summarizer_input_tokens": None,
+                    "summarizer_output_tokens": None,
+                    "has_tool_calls": False,
+                }
+            )
+            reward = 1.0 if task_id == "task-1" else 0.0
+            return MockResults(
+                simulations=[
+                    MockSimulation(
+                        task_id=task_id,
+                        trial=0,
+                        reward_info={"reward": reward},
+                        messages=[
+                            MockMessage("user", f"{task_id}-user"),
+                            MockMessage(
+                                "assistant",
+                                f"<think>{task_id}-think</think>{task_id}-reply",
+                            ),
+                        ],
+                    )
+                ]
+            )
+
+        tau2_module = ModuleType("tau2")
+        tau2_data_model_module = ModuleType("tau2.data_model")
+        tau2_data_model_simulation_module = ModuleType("tau2.data_model.simulation")
+        tau2_runner_module = ModuleType("tau2.runner")
+        tau2_runner_batch_module = ModuleType("tau2.runner.batch")
+        tau2_runner_helpers_module = ModuleType("tau2.runner.helpers")
+        setattr(tau2_data_model_simulation_module, "TextRunConfig", FakeTextRunConfig)
+        setattr(tau2_runner_batch_module, "run_tasks", fake_run_tasks)
+        setattr(tau2_runner_helpers_module, "get_tasks", fake_get_tasks)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "run"
+            with mock.patch.dict(
+                sys.modules,
+                {
+                    "src.register": ModuleType("src.register"),
+                    "tau2": tau2_module,
+                    "tau2.data_model": tau2_data_model_module,
+                    "tau2.data_model.simulation": tau2_data_model_simulation_module,
+                    "tau2.runner": tau2_runner_module,
+                    "tau2.runner.batch": tau2_runner_batch_module,
+                    "tau2.runner.helpers": tau2_runner_helpers_module,
+                },
+                clear=False,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    run_phase1.execute_condition_run_with_cleanup(
+                        run_dir=run_dir,
+                        config={},
+                        experiment={
+                            "domain": "telecom",
+                            "task_split": "phase1",
+                            "trials": 1,
+                        },
+                        user_llm="openrouter/user-sim",
+                        model=run_phase1.ModelConfig("repo/a", "a.gguf", "model-a"),
+                        condition=run_phase1.ConditionConfig(
+                            "retain_all", True, "retain_all"
+                        ),
+                        task_ids=["task-1", "task-2"],
+                        port=8080,
+                    )
+
+                failed_summary = json.loads(
+                    (run_dir / "summary.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(failed_summary["status"], "failed")
+                self.assertEqual(
+                    json.loads((run_dir / "progress.json").read_text(encoding="utf-8"))[
+                        "completed_task_ids"
+                    ],
+                    ["task-1"],
+                )
+
+                task2_should_fail = False
+                summary = run_phase1.execute_condition_run_with_cleanup(
+                    run_dir=run_dir,
+                    config={},
+                    experiment={
+                        "domain": "telecom",
+                        "task_split": "phase1",
+                        "trials": 1,
+                    },
+                    user_llm="openrouter/user-sim",
+                    model=run_phase1.ModelConfig("repo/a", "a.gguf", "model-a"),
+                    condition=run_phase1.ConditionConfig(
+                        "retain_all", True, "retain_all"
+                    ),
+                    task_ids=["task-1", "task-2"],
+                    port=8080,
+                )
+
+            results = json.loads((run_dir / "results.json").read_text(encoding="utf-8"))
+            thinking_records = [
+                json.loads(line)
+                for line in (run_dir / "thinking_analysis.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+        self.assertEqual(run_calls, ["task-1", "task-2", "task-2"])
+        self.assertEqual(
+            [sim["task_id"] for sim in results["simulations"]], ["task-1", "task-2"]
+        )
+        self.assertEqual(
+            [record["task_id"] for record in thinking_records], ["task-1", "task-2"]
+        )
+        self.assertEqual(summary["status"], "complete")
+        self.assertEqual(summary["num_simulations"], 2)
+        self.assertEqual(summary["full_reward_count"], 1)
 
     def test_configure_condition_environment_sets_summarizer_env_vars(self) -> None:
         config = {
@@ -656,6 +821,103 @@ class RunPhase1Test(unittest.TestCase):
             output = stdout.getvalue()
             self.assertIn("Fresh run: ignoring existing results", output)
             self.assertNotIn("Skipping completed", output)
+
+    def test_main_reuses_partial_run_directory_when_resuming(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        condition = run_phase1.ConditionConfig("retain_all", True, "retain_all")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            partial_dir = results_root / "model-a_retain_all_20260101T000000Z"
+            partial_dir.mkdir(parents=True, exist_ok=True)
+            (partial_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "model": model.short_name,
+                        "condition": condition.name,
+                        "task_ids": ["task-1"],
+                        "status": "failed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (partial_dir / "progress.json").write_text(
+                json.dumps({"completed_task_ids": ["task-1"]}),
+                encoding="utf-8",
+            )
+            (partial_dir / "results.json").write_text(
+                json.dumps(
+                    {
+                        "simulations": [
+                            {
+                                "task_id": "task-1",
+                                "messages": [{"role": "user", "content": "hi"}] * 6,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self._patch_main_dependencies(
+                results_root=results_root,
+                models=[model],
+                conditions=[condition],
+                execute_condition_run=mock.Mock(
+                    return_value={
+                        "model": model.short_name,
+                        "condition": condition.name,
+                    }
+                ),
+            ) as execute_condition_run:
+                run_phase1.main(self._main_args())
+
+            self.assertEqual(
+                execute_condition_run.call_args.kwargs["run_dir"],
+                partial_dir,
+            )
+
+    def test_main_fresh_ignores_partial_run_directory(self) -> None:
+        model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
+        condition = run_phase1.ConditionConfig("retain_all", True, "retain_all")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            results_root = Path(tmpdir)
+            partial_dir = results_root / "model-a_retain_all_20260101T000000Z"
+            partial_dir.mkdir(parents=True, exist_ok=True)
+            (partial_dir / "summary.json").write_text(
+                json.dumps(
+                    {
+                        "model": model.short_name,
+                        "condition": condition.name,
+                        "task_ids": ["task-1"],
+                        "status": "failed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (partial_dir / "progress.json").write_text(
+                json.dumps({"completed_task_ids": ["task-1"]}),
+                encoding="utf-8",
+            )
+
+            with self._patch_main_dependencies(
+                results_root=results_root,
+                models=[model],
+                conditions=[condition],
+                execute_condition_run=mock.Mock(
+                    return_value={
+                        "model": model.short_name,
+                        "condition": condition.name,
+                    }
+                ),
+            ) as execute_condition_run:
+                run_phase1.main(self._main_args(fresh=True))
+
+            self.assertNotEqual(
+                execute_condition_run.call_args.kwargs["run_dir"],
+                partial_dir,
+            )
 
     def test_main_does_not_skip_mismatched_subset_runs(self) -> None:
         model = run_phase1.ModelConfig("repo/a", "a.gguf", "model-a")
@@ -939,6 +1201,29 @@ class RunPhase1Test(unittest.TestCase):
                 f"Cleaned up partial run: {run_dir.name}",
                 stdout.getvalue(),
             )
+
+    def test_cleanup_partial_run_preserves_directory_with_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir) / "model-a_condition-a_20260101T000000Z"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "summary.json").write_text(
+                json.dumps({"status": "running"}), encoding="utf-8"
+            )
+            (run_dir / "progress.json").write_text(
+                json.dumps({"completed_task_ids": ["task-1"]}), encoding="utf-8"
+            )
+
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                run_phase1.cleanup_partial_run(run_dir, RuntimeError("boom"))
+
+            self.assertTrue(run_dir.exists())
+            written_summary = json.loads(
+                (run_dir / "summary.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(written_summary["status"], "failed")
+            self.assertEqual(written_summary["error"], "boom")
+            self.assertIn(f"Preserved failed run: {run_dir.name}", stdout.getvalue())
 
     def test_exit_if_shutdown_requested_exits_cleanly_between_conditions(self) -> None:
         run_phase1._shutdown_requested = True
